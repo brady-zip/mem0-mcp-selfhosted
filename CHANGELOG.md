@@ -12,6 +12,13 @@
   `:6333`). Takes precedence over `MEM0_QDRANT_URL`; the url/api_key/timeout/client branches are
   skipped in embedded mode.
 
+### Bug Fixes
+
+- Fix the SessionStart context hook for the mem0ai 2.x search API. `context_main` still called
+  `search(user_id=..., limit=...)` (1.x), which mem0ai 2.x rejects (entity scopes must go in
+  `filters=`, and the arg is `top_k=`, not `limit=`) — so auto-recall silently no-op'd. Now uses
+  `search(filters={"user_id": ...}, top_k=...)`, matching the server's `search_memories` tool.
+
 
 ## v0.3.2 (2026-03-13)
 

@@ -126,8 +126,11 @@ def context_main() -> None:
         ]
 
         for query in queries:
+            # NOTE(fork): mem0ai 2.x search(query, *, top_k, filters, ...) takes
+            # entity scopes inside `filters` (not top-level) and uses `top_k`,
+            # not `limit` — same as server.py's search_memories tool.
             results = _extract_results(
-                mem.search(query=query, user_id=user_id, limit=15)
+                mem.search(query=query, filters={"user_id": user_id}, top_k=15)
             )
             for r in results:
                 mid = r.get("id")
@@ -371,7 +374,10 @@ def install_main() -> None:
     else:
         project_dir = Path(args.project_dir) if args.project_dir else Path.cwd()
         if not project_dir.is_dir():
-            print(f"Error: project directory does not exist: {project_dir}", file=sys.stderr)
+            print(
+                f"Error: project directory does not exist: {project_dir}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         settings_dir = project_dir / ".claude"
 
@@ -410,11 +416,13 @@ def install_main() -> None:
     else:
         hooks["SessionStart"].append({
             "matcher": "startup|compact",
-            "hooks": [{
-                "type": "command",
-                "command": _HOOK_CONTEXT_CMD,
-                "timeout": 15000,
-            }],
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": _HOOK_CONTEXT_CMD,
+                    "timeout": 15000,
+                }
+            ],
         })
         installed.append(f"SessionStart ({_HOOK_CONTEXT_CMD})")
 
@@ -425,11 +433,13 @@ def install_main() -> None:
         skipped.append(f"Stop ({_HOOK_STOP_CMD})")
     else:
         hooks["Stop"].append({
-            "hooks": [{
-                "type": "command",
-                "command": _HOOK_STOP_CMD,
-                "timeout": 30000,
-            }],
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": _HOOK_STOP_CMD,
+                    "timeout": 30000,
+                }
+            ],
         })
         installed.append(f"Stop ({_HOOK_STOP_CMD})")
 
