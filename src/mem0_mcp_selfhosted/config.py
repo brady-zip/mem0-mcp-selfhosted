@@ -45,7 +45,9 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
 
     # --- Top-level provider default (cascades to LLM and graph LLM) ---
     _provider_default = env("MEM0_PROVIDER", "anthropic")
-    _supported_llm_providers = ("anthropic", "ollama")
+    # NOTE(fork): "openai" added so this self-hosted server can use mem0ai's
+    # built-in OpenAI LLM/embedder (no custom client needed) with OPENAI_API_KEY.
+    _supported_llm_providers = ("anthropic", "ollama", "openai")
     if _provider_default not in _supported_llm_providers:
         raise ValueError(
             f"Unsupported MEM0_PROVIDER={_provider_default!r}. "
@@ -60,7 +62,11 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
             f"Supported: {list(_supported_llm_providers)}"
         )
 
-    _llm_model_defaults = {"anthropic": "claude-opus-4-6", "ollama": "qwen3:14b"}
+    _llm_model_defaults = {
+        "anthropic": "claude-opus-4-6",
+        "ollama": "qwen3:14b",
+        "openai": "gpt-4o-mini",
+    }
     llm_model = env("MEM0_LLM_MODEL", _llm_model_defaults[llm_provider])
     llm_max_tokens = int(env("MEM0_LLM_MAX_TOKENS", "16384"))
 
@@ -71,6 +77,11 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
             llm_config["api_key"] = token
     elif llm_provider == "ollama":
         llm_config["ollama_base_url"] = _resolve_ollama_url("MEM0_LLM_URL")
+    elif llm_provider == "openai":
+        # mem0ai's built-in OpenAILLM; reads OPENAI_API_KEY from env, set explicitly too.
+        openai_key = opt_env("OPENAI_API_KEY")
+        if openai_key:
+            llm_config["api_key"] = openai_key
 
     # --- Embedder ---
     embed_provider = env("MEM0_EMBED_PROVIDER", "ollama")
@@ -83,36 +94,57 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
     }
     if embed_provider == "ollama":
         embedder_config["ollama_base_url"] = embed_url
+    elif embed_provider == "openai":
+        # mem0ai's built-in OpenAIEmbedding; reads OPENAI_API_KEY from env, set explicitly too.
+        openai_key = opt_env("OPENAI_API_KEY")
+        if openai_key:
+            embedder_config["api_key"] = openai_key
 
     # --- Vector Store ---
-    qdrant_url = env("MEM0_QDRANT_URL", "http://localhost:6333")
     collection = env("MEM0_COLLECTION", "mem0_mcp_selfhosted")
-    qdrant_api_key = opt_env("MEM0_QDRANT_API_KEY")
     qdrant_on_disk = bool_env("MEM0_QDRANT_ON_DISK")
 
-    vector_config: dict[str, Any] = {
-        "collection_name": collection,
-        "url": qdrant_url,
-        "embedding_model_dims": embed_dims,
-    }
-    if qdrant_api_key:
-        vector_config["api_key"] = qdrant_api_key
-    if qdrant_on_disk:
-        vector_config["on_disk"] = True
-    qdrant_timeout = opt_env("MEM0_QDRANT_TIMEOUT")
-    if qdrant_timeout:
-        # QdrantConfig's Pydantic model does not accept "timeout" directly.
-        # Create a pre-configured QdrantClient with the timeout and pass it
-        # via the "client" field, which mem0ai uses as-is.
-        from qdrant_client import QdrantClient
+    # NOTE(fork): embedded on-disk Qdrant. When MEM0_QDRANT_PATH is set, mem0ai's
+    # QdrantConfig runs QdrantClient(path=...) — a local, server-less store (no
+    # Qdrant server / Docker, no :6333). This lets a fully self-contained stack
+    # run from a single process. The url/api_key/timeout/client branches below
+    # are all server-mode concerns and are skipped in embedded mode.
+    qdrant_path = opt_env("MEM0_QDRANT_PATH")
+    if qdrant_path:
+        vector_config: dict[str, Any] = {
+            "collection_name": collection,
+            "path": os.path.expanduser(qdrant_path),
+            "embedding_model_dims": embed_dims,
+        }
+        if qdrant_on_disk:
+            vector_config["on_disk"] = True
+    else:
+        qdrant_url = env("MEM0_QDRANT_URL", "http://localhost:6333")
+        qdrant_api_key = opt_env("MEM0_QDRANT_API_KEY")
 
-        client_kwargs: dict[str, Any] = {
+        vector_config = {
+            "collection_name": collection,
             "url": qdrant_url,
-            "timeout": int(qdrant_timeout),
+            "embedding_model_dims": embed_dims,
         }
         if qdrant_api_key:
-            client_kwargs["api_key"] = qdrant_api_key
-        vector_config["client"] = QdrantClient(**client_kwargs)
+            vector_config["api_key"] = qdrant_api_key
+        if qdrant_on_disk:
+            vector_config["on_disk"] = True
+        qdrant_timeout = opt_env("MEM0_QDRANT_TIMEOUT")
+        if qdrant_timeout:
+            # QdrantConfig's Pydantic model does not accept "timeout" directly.
+            # Create a pre-configured QdrantClient with the timeout and pass it
+            # via the "client" field, which mem0ai uses as-is.
+            from qdrant_client import QdrantClient
+
+            client_kwargs: dict[str, Any] = {
+                "url": qdrant_url,
+                "timeout": int(qdrant_timeout),
+            }
+            if qdrant_api_key:
+                client_kwargs["api_key"] = qdrant_api_key
+            vector_config["client"] = QdrantClient(**client_kwargs)
 
     # --- History ---
     history_db_path = opt_env("MEM0_HISTORY_DB_PATH")
@@ -139,7 +171,9 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
 
     # --- Graph Store (conditional) ---
     enable_graph = bool_env("MEM0_ENABLE_GRAPH")
-    graph_llm_provider_raw: str | None = None  # set inside block, used for provider registration
+    graph_llm_provider_raw: str | None = (
+        None  # set inside block, used for provider registration
+    )
     if enable_graph:
         neo4j_url = env("MEM0_NEO4J_URL", "bolt://127.0.0.1:7687")
         neo4j_user = env("MEM0_NEO4J_USER", "neo4j")
@@ -226,14 +260,15 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
         },
     ]
     # Register Anthropic when used as main LLM, graph LLM, or contradiction LLM
-    contradiction_provider = env(
-        "MEM0_GRAPH_CONTRADICTION_LLM_PROVIDER", "anthropic"
-    )
+    contradiction_provider = env("MEM0_GRAPH_CONTRADICTION_LLM_PROVIDER", "anthropic")
     _needs_anthropic = (
         llm_provider == "anthropic"
         or (enable_graph and graph_llm_provider_raw in ("anthropic", "anthropic_oat"))
-        or (enable_graph and graph_llm_provider_raw == "gemini_split"
-            and contradiction_provider in ("anthropic", "anthropic_oat"))
+        or (
+            enable_graph
+            and graph_llm_provider_raw == "gemini_split"
+            and contradiction_provider in ("anthropic", "anthropic_oat")
+        )
     )
     if _needs_anthropic:
         providers_info.append({

@@ -105,7 +105,10 @@ def _init_memory() -> Any:
 
     # If split-model was requested, swap the graph LLM with the router
     if split_config and memory.graph is not None:
-        from mem0_mcp_selfhosted.llm_router import SplitModelGraphLLM, SplitModelGraphLLMConfig
+        from mem0_mcp_selfhosted.llm_router import (
+            SplitModelGraphLLM,
+            SplitModelGraphLLMConfig,
+        )
 
         router_config = SplitModelGraphLLMConfig(**split_config)
         memory.graph.llm = SplitModelGraphLLM(router_config)
@@ -185,14 +188,50 @@ def _register_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def add_memory(
-        text: Annotated[str, Field(description="Text to store as a memory. Converted to messages format internally.")],
-        messages: Annotated[list[dict] | None, Field(description="Structured conversation history (role/content dicts). When provided, takes precedence over text.")] = None,
-        user_id: Annotated[str | None, Field(description="User scope identifier. Defaults to MEM0_USER_ID.")] = None,
-        agent_id: Annotated[str | None, Field(description="Agent scope identifier.")] = None,
-        run_id: Annotated[str | None, Field(description="Run scope identifier.")] = None,
-        metadata: Annotated[dict | None, Field(description="Arbitrary metadata JSON to store alongside the memory.")] = None,
-        infer: Annotated[bool | None, Field(description="If true (default), LLM extracts key facts. If false, stores raw text.")] = None,
-        enable_graph: Annotated[bool | None, Field(description="Override default graph toggle for this call.")] = None,
+        text: Annotated[
+            str,
+            Field(
+                description="Text to store as a memory. Converted to messages format internally."
+            ),
+        ],
+        messages: Annotated[
+            list[dict] | None,
+            Field(
+                description="Structured conversation history (role/content dicts). When provided, takes precedence over text."
+            ),
+        ] = None,
+        user_id: Annotated[
+            str | None,
+            Field(description="User scope identifier. Defaults to MEM0_USER_ID."),
+        ] = None,
+        agent_id: Annotated[
+            str | None, Field(description="Agent scope identifier.")
+        ] = None,
+        run_id: Annotated[
+            str | None, Field(description="Run scope identifier.")
+        ] = None,
+        app_id: Annotated[
+            str | None,
+            Field(
+                description="App/domain scope (entity-scoped memory). Stored in metadata "
+                "and filterable on search. Use to partition memories by domain, e.g. "
+                "'evergreen' (repo project work) vs 'meta' (Claude tooling/customizations)."
+            ),
+        ] = None,
+        metadata: Annotated[
+            dict | None,
+            Field(description="Arbitrary metadata JSON to store alongside the memory."),
+        ] = None,
+        infer: Annotated[
+            bool | None,
+            Field(
+                description="If true (default), LLM extracts key facts. If false, stores raw text."
+            ),
+        ] = None,
+        enable_graph: Annotated[
+            bool | None,
+            Field(description="Override default graph toggle for this call."),
+        ] = None,
     ) -> str:
         """Store a new memory. Requires at least one of user_id, agent_id, or run_id."""
         uid = user_id or get_default_user_id()
@@ -208,8 +247,19 @@ def _register_tools(mcp: FastMCP) -> None:
             kwargs["agent_id"] = agent_id
         if run_id:
             kwargs["run_id"] = run_id
-        if metadata:
-            kwargs["metadata"] = metadata
+        # app_id is not a native OSS scope; persist it inside metadata so it lands
+        # in the Qdrant payload as a top-level, filterable key (search passes it
+        # through `filters`). This emulates Mem0 Platform's entity-scoped app_id.
+        # Domain partition: "evergreen" (evergreen-repo work) vs "meta" (everything
+        # else). Claude Code passes app_id explicitly (a PreToolUse hook enforces
+        # it); writers that don't specify one — e.g. the Hermes/Hal ops layer, which
+        # is always meta-domain — fall back to the default below so nothing escapes
+        # the partition untagged.
+        meta = dict(metadata) if metadata else {}
+        if app_id:
+            meta["app_id"] = app_id
+        meta.setdefault("app_id", "meta")
+        kwargs["metadata"] = meta
         if infer is not None:
             kwargs["infer"] = infer
 
@@ -218,32 +268,61 @@ def _register_tools(mcp: FastMCP) -> None:
         def _do_add():
             return mem.add(msgs, **kwargs)
 
-        return _mem0_call(call_with_graph, mem, enable_graph, _enable_graph_default, _do_add)
+        return _mem0_call(
+            call_with_graph, mem, enable_graph, _enable_graph_default, _do_add
+        )
 
     @mcp.tool()
     def search_memories(
-        query: Annotated[str, Field(description="Natural language description of what to find.")],
-        user_id: Annotated[str | None, Field(description="User scope. Defaults to MEM0_USER_ID.")] = None,
+        query: Annotated[
+            str, Field(description="Natural language description of what to find.")
+        ],
+        user_id: Annotated[
+            str | None, Field(description="User scope. Defaults to MEM0_USER_ID.")
+        ] = None,
         agent_id: Annotated[str | None, Field(description="Agent scope.")] = None,
         run_id: Annotated[str | None, Field(description="Run scope.")] = None,
-        filters: Annotated[dict | None, Field(description="Additional structured filter clauses.")] = None,
-        limit: Annotated[int | None, Field(description="Maximum number of results.")] = None,
-        threshold: Annotated[float | None, Field(description="Minimum relevance score (0.0-1.0).")] = None,
-        rerank: Annotated[bool | None, Field(description="Whether to apply reranking.")] = None,
-        enable_graph: Annotated[bool | None, Field(description="Override default graph toggle.")] = None,
+        app_id: Annotated[
+            str | None,
+            Field(
+                description="App/domain scope to filter by (e.g. 'evergreen' vs 'meta'). "
+                "Matches the app_id stored in metadata at write time."
+            ),
+        ] = None,
+        filters: Annotated[
+            dict | None, Field(description="Additional structured filter clauses.")
+        ] = None,
+        limit: Annotated[
+            int | None, Field(description="Maximum number of results.")
+        ] = None,
+        threshold: Annotated[
+            float | None, Field(description="Minimum relevance score (0.0-1.0).")
+        ] = None,
+        rerank: Annotated[
+            bool | None, Field(description="Whether to apply reranking.")
+        ] = None,
+        enable_graph: Annotated[
+            bool | None, Field(description="Override default graph toggle.")
+        ] = None,
     ) -> str:
         """Semantic search across existing memories."""
         uid = user_id or get_default_user_id()
 
-        kwargs: dict[str, Any] = {"user_id": uid, "query": query}
+        # NOTE(fork): mem0ai 2.0.4 search(query, *, top_k, filters, ...) takes entity
+        # scopes inside `filters` (not top-level) and uses `top_k`, not `limit`.
+        search_filters: dict[str, Any] = dict(filters) if filters else {}
+        search_filters["user_id"] = uid
         if agent_id:
-            kwargs["agent_id"] = agent_id
+            search_filters["agent_id"] = agent_id
         if run_id:
-            kwargs["run_id"] = run_id
-        if filters:
-            kwargs["filters"] = filters
+            search_filters["run_id"] = run_id
+        if app_id:
+            # app_id lives in the payload (written via metadata); filter matches it.
+            search_filters["app_id"] = app_id
+
+        kwargs: dict[str, Any] = {"query": query, "filters": search_filters}
         if limit is not None:
-            kwargs["limit"] = limit
+            kwargs["top_k"] = limit
         if threshold is not None:
             kwargs["threshold"] = threshold
         if rerank is not None:
@@ -254,29 +333,53 @@ def _register_tools(mcp: FastMCP) -> None:
         def _do_search():
             return mem.search(**kwargs)
 
-        return _mem0_call(call_with_graph, mem, enable_graph, _enable_graph_default, _do_search)
+        return _mem0_call(
+            call_with_graph, mem, enable_graph, _enable_graph_default, _do_search
+        )
 
     @mcp.tool()
     def get_memories(
-        user_id: Annotated[str | None, Field(description="User scope. Defaults to MEM0_USER_ID.")] = None,
+        user_id: Annotated[
+            str | None, Field(description="User scope. Defaults to MEM0_USER_ID.")
+        ] = None,
         agent_id: Annotated[str | None, Field(description="Agent scope.")] = None,
         run_id: Annotated[str | None, Field(description="Run scope.")] = None,
-        limit: Annotated[int | None, Field(description="Maximum number of memories to return.")] = None,
+        app_id: Annotated[
+            str | None,
+            Field(
+                description="App/domain scope to filter by (e.g. 'evergreen' vs 'meta')."
+            ),
+        ] = None,
+        limit: Annotated[
+            int | None, Field(description="Maximum number of memories to return.")
+        ] = None,
     ) -> str:
         """Page through memories using filters instead of search."""
         uid = user_id or get_default_user_id()
 
-        kwargs: dict[str, Any] = {"user_id": uid}
+        # NOTE(fork): mem0ai 2.0.4 get_all(*, filters, top_k, ...) takes entity
+        # scopes inside `filters` (not top-level) and uses `top_k`, not `limit`.
+        get_filters: dict[str, Any] = {"user_id": uid}
         if agent_id:
-            kwargs["agent_id"] = agent_id
+            get_filters["agent_id"] = agent_id
         if run_id:
-            kwargs["run_id"] = run_id
+            get_filters["run_id"] = run_id
+        if app_id:
+            get_filters["app_id"] = app_id
+
+        kwargs: dict[str, Any] = {"filters": get_filters}
         if limit is not None:
-            kwargs["limit"] = limit
+            kwargs["top_k"] = limit
 
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": "Memory not initialized",
+                    "detail": "Infrastructure may be unavailable.",
+                },
+                ensure_ascii=False,
+            )
         return _mem0_call(mem.get_all, **kwargs)
 
     @mcp.tool()
@@ -286,7 +389,13 @@ def _register_tools(mcp: FastMCP) -> None:
         """Fetch a single memory by its ID."""
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": "Memory not initialized",
+                    "detail": "Infrastructure may be unavailable.",
+                },
+                ensure_ascii=False,
+            )
         return _mem0_call(mem.get, memory_id)
 
     @mcp.tool()
@@ -297,7 +406,13 @@ def _register_tools(mcp: FastMCP) -> None:
         """Overwrite an existing memory's text. Re-embeds and re-indexes."""
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": "Memory not initialized",
+                    "detail": "Infrastructure may be unavailable.",
+                },
+                ensure_ascii=False,
+            )
 
         def _do_update():
             mem.update(memory_id, data=text)
@@ -312,7 +427,13 @@ def _register_tools(mcp: FastMCP) -> None:
         """Delete a single memory."""
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": "Memory not initialized",
+                    "detail": "Infrastructure may be unavailable.",
+                },
+                ensure_ascii=False,
+            )
 
         def _do_delete():
             mem.delete(memory_id)
@@ -322,8 +443,12 @@ def _register_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def delete_all_memories(
-        user_id: Annotated[str | None, Field(description="User scope to delete.")] = None,
-        agent_id: Annotated[str | None, Field(description="Agent scope to delete.")] = None,
+        user_id: Annotated[
+            str | None, Field(description="User scope to delete.")
+        ] = None,
+        agent_id: Annotated[
+            str | None, Field(description="Agent scope to delete.")
+        ] = None,
         run_id: Annotated[str | None, Field(description="Run scope to delete.")] = None,
     ) -> str:
         """Bulk-delete all memories in the given scope. Requires at least one filter.
@@ -333,7 +458,9 @@ def _register_tools(mcp: FastMCP) -> None:
         uid = user_id or get_default_user_id()
         if not any([uid, agent_id, run_id]):
             return json.dumps(
-                {"error": "At least one scope (user_id, agent_id, or run_id) is required."},
+                {
+                    "error": "At least one scope (user_id, agent_id, or run_id) is required."
+                },
                 ensure_ascii=False,
             )
 
@@ -347,7 +474,13 @@ def _register_tools(mcp: FastMCP) -> None:
 
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": "Memory not initialized",
+                    "detail": "Infrastructure may be unavailable.",
+                },
+                ensure_ascii=False,
+            )
 
         def _do_bulk_delete():
             count = safe_bulk_delete(mem, filters, graph_enabled=_enable_graph_default)
@@ -368,7 +501,13 @@ def _register_tools(mcp: FastMCP) -> None:
         """
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": "Memory not initialized",
+                    "detail": "Infrastructure may be unavailable.",
+                },
+                ensure_ascii=False,
+            )
 
         def _do_list():
             return list_entities_facet(mem)
@@ -377,9 +516,16 @@ def _register_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def delete_entities(
-        user_id: Annotated[str | None, Field(description="User entity to delete (cascades to all memories).")] = None,
-        agent_id: Annotated[str | None, Field(description="Agent entity to delete.")] = None,
-        run_id: Annotated[str | None, Field(description="Run entity to delete.")] = None,
+        user_id: Annotated[
+            str | None,
+            Field(description="User entity to delete (cascades to all memories)."),
+        ] = None,
+        agent_id: Annotated[
+            str | None, Field(description="Agent entity to delete.")
+        ] = None,
+        run_id: Annotated[
+            str | None, Field(description="Run entity to delete.")
+        ] = None,
     ) -> str:
         """Delete an entity and cascade-delete all its memories.
 
@@ -387,7 +533,9 @@ def _register_tools(mcp: FastMCP) -> None:
         """
         if not any([user_id, agent_id, run_id]):
             return json.dumps(
-                {"error": "At least one scope (user_id, agent_id, or run_id) is required."},
+                {
+                    "error": "At least one scope (user_id, agent_id, or run_id) is required."
+                },
                 ensure_ascii=False,
             )
 
@@ -401,11 +549,20 @@ def _register_tools(mcp: FastMCP) -> None:
 
         mem = _ensure_memory()
         if mem is None:
-            return json.dumps({"error": "Memory not initialized", "detail": "Infrastructure may be unavailable."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": "Memory not initialized",
+                    "detail": "Infrastructure may be unavailable.",
+                },
+                ensure_ascii=False,
+            )
 
         def _do_delete_entity():
             count = safe_bulk_delete(mem, filters, graph_enabled=_enable_graph_default)
-            return {"message": f"Entity deleted. Removed {count} memories.", "count": count}
+            return {
+                "message": f"Entity deleted. Removed {count} memories.",
+                "count": count,
+            }
 
         return _mem0_call(_do_delete_entity)
 
@@ -415,7 +572,12 @@ def _register_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def mcp_search_graph(
-        query: Annotated[str, Field(description="Entity or topic to search for (e.g., 'Python', 'TypeScript').")],
+        query: Annotated[
+            str,
+            Field(
+                description="Entity or topic to search for (e.g., 'Python', 'TypeScript')."
+            ),
+        ],
     ) -> str:
         """Search entities by name/id substring matching in Neo4j knowledge graph."""
         return search_graph(query)
@@ -452,7 +614,7 @@ def _register_prompts(mcp: FastMCP) -> None:
             "- Set enable_graph=true to include knowledge graph results\n"
             "- Use infer=false to store raw text without LLM extraction\n"
             "- Use threshold on search_memories to filter by relevance score\n"
-            "- Use filters for structured queries: {\"key\": {\"eq\": \"value\"}}\n"
+            '- Use filters for structured queries: {"key": {"eq": "value"}}\n'
         )
 
 

@@ -1,6 +1,18 @@
 # CHANGELOG
 
 
+## v0.4.0 (2026-06-11)
+
+### Features
+
+- Add `openai` LLM/embedder provider — use mem0ai's built-in OpenAI LLM and embedder via
+  `OPENAI_API_KEY` (one key for both), with `app_id` partitioning support.
+- Add embedded on-disk Qdrant via `MEM0_QDRANT_PATH`. When set, mem0ai's `QdrantConfig` runs
+  `QdrantClient(path=...)` — a server-less, persistent local store (no Qdrant server / Docker /
+  `:6333`). Takes precedence over `MEM0_QDRANT_URL`; the url/api_key/timeout/client branches are
+  skipped in embedded mode.
+
+
 ## v0.3.2 (2026-03-13)
 
 ### Bug Fixes
