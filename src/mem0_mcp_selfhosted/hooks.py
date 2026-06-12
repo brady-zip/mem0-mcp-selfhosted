@@ -46,6 +46,34 @@ def _get_user_id() -> str:
     return os.environ.get("MEM0_USER_ID", "user")
 
 
+def _get_app_id() -> str | None:
+    """Resolve the capture app_id (domain partition) from MEM0_APP_ID.
+
+    Optional and backward-compatible: when unset (the generic / teammate
+    case), capture writes no app_id and behaves exactly as before. When set
+    (B's partitioned stack, where the hook wrapper exports the cwd-derived
+    domain), stop_main tags the captured memory with ``metadata.app_id`` so it
+    lands in the right bucket (e.g. ``evergreen`` vs ``general``).
+    """
+    val = os.environ.get("MEM0_APP_ID", "").strip()
+    return val or None
+
+
+def _get_recall_app_ids() -> list[str]:
+    """Resolve the recall app_id filter list from MEM0_RECALL_APP_IDS.
+
+    Optional and backward-compatible: a comma-separated list of app_ids to
+    scope SessionStart recall to. When unset (generic case), recall filters on
+    ``user_id`` only — unchanged behaviour. When set, context_main runs its
+    multi-query search once per app_id (filtering on
+    ``{"user_id": ..., "app_id": <id>}``) and merges/dedups the results, so an
+    actor can recall across several domains (e.g. Hal reads ``hal-ops`` plus
+    ``evergreen``).
+    """
+    raw = os.environ.get("MEM0_RECALL_APP_IDS", "")
+    return [a.strip() for a in raw.split(",") if a.strip()]
+
+
 def _get_memory():
     """Lazy-initialize and cache a mem0 Memory instance with graph disabled.
 
@@ -113,6 +141,7 @@ def context_main() -> None:
         if not project_name:
             project_name = "project"
         user_id = _get_user_id()
+        recall_app_ids = _get_recall_app_ids()
 
         mem = _get_memory()
 
@@ -125,18 +154,31 @@ def context_main() -> None:
             f"recent session summary, decisions, key changes for {project_name}",
         ]
 
-        for query in queries:
-            # NOTE(fork): mem0ai 2.x search(query, *, top_k, filters, ...) takes
-            # entity scopes inside `filters` (not top-level) and uses `top_k`,
-            # not `limit` — same as server.py's search_memories tool.
-            results = _extract_results(
-                mem.search(query=query, filters={"user_id": user_id}, top_k=15)
-            )
-            for r in results:
-                mid = r.get("id")
-                if mid and mid not in seen_ids:
-                    seen_ids.add(mid)
-                    all_memories.append(r)
+        # When MEM0_RECALL_APP_IDS is set, scope recall to those domain
+        # partitions (one filter set per app_id); otherwise filter on user_id
+        # alone (backward-compatible generic behaviour). Each filter is run
+        # against every query; the dedup-by-id loop below merges all results.
+        if recall_app_ids:
+            filter_sets = [
+                {"user_id": user_id, "app_id": app_id} for app_id in recall_app_ids
+            ]
+        else:
+            filter_sets = [{"user_id": user_id}]
+
+        for filters in filter_sets:
+            for query in queries:
+                # NOTE(fork): mem0ai 2.x search(query, *, top_k, filters, ...) takes
+                # entity scopes inside `filters` (not top-level) and uses `top_k`,
+                # not `limit` — same as server.py's search_memories tool. app_id is
+                # matched against the value persisted in the Qdrant payload.
+                results = _extract_results(
+                    mem.search(query=query, filters=filters, top_k=15)
+                )
+                for r in results:
+                    mid = r.get("id")
+                    if mid and mid not in seen_ids:
+                        seen_ids.add(mid)
+                        all_memories.append(r)
 
         # Cap total injected memories
         all_memories = all_memories[:_MAX_MEMORIES]
@@ -262,15 +304,23 @@ def stop_main() -> None:
 
         mem = _get_memory()
         user_id = _get_user_id()
+        app_id = _get_app_id()
+
+        metadata: dict = {
+            "source": "session-stop-hook",
+            "session_id": session_id,
+        }
+        # When MEM0_APP_ID is set, tag the captured memory with the domain
+        # partition so it lands in the right bucket and is filterable on recall.
+        # When unset, no app_id is written (backward-compatible generic case).
+        if app_id:
+            metadata["app_id"] = app_id
 
         mem.add(
             messages=[{"role": "user", "content": summary}],
             user_id=user_id,
             infer=True,
-            metadata={
-                "source": "session-stop-hook",
-                "session_id": session_id,
-            },
+            metadata=metadata,
         )
 
         _output(_nonfatal())

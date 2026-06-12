@@ -1,6 +1,21 @@
 # CHANGELOG
 
 
+## v0.5.0 (2026-06-11)
+
+### Features
+
+- Make the auto-capture/recall hooks `app_id`-aware via two optional, backward-compatible env
+  vars. `stop_main` (capture) reads `MEM0_APP_ID`: when set, the captured session-summary memory
+  is tagged with `metadata.app_id` (the domain partition); when unset, no app_id is written —
+  unchanged generic behaviour. `context_main` (recall) reads `MEM0_RECALL_APP_IDS` (comma-
+  separated): when set, the existing multi-query search runs once per app_id with
+  `filters={"user_id": ..., "app_id": <id>}` and results are merged/deduped by id, so an actor can
+  recall across several domains; when unset, recall filters on `user_id` alone — unchanged. New
+  `_get_app_id()` / `_get_recall_app_ids()` helpers mirror `_get_user_id()`. This lets the same
+  fork serve both a partitioned personal stack (B: evergreen/general/hal-ops) and generic use.
+
+
 ## v0.4.0 (2026-06-11)
 
 ### Features
