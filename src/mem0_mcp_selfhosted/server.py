@@ -215,7 +215,8 @@ def _register_tools(mcp: FastMCP) -> None:
             Field(
                 description="App/domain scope (entity-scoped memory). Stored in metadata "
                 "and filterable on search. Use to partition memories by domain, e.g. "
-                "'evergreen' (repo project work) vs 'meta' (Claude tooling/customizations)."
+                "'evergreen' (repo project work), 'general' (tooling/customizations), "
+                "'hal-ops' (Hal ops)."
             ),
         ] = None,
         metadata: Annotated[
@@ -250,15 +251,16 @@ def _register_tools(mcp: FastMCP) -> None:
         # app_id is not a native OSS scope; persist it inside metadata so it lands
         # in the Qdrant payload as a top-level, filterable key (search passes it
         # through `filters`). This emulates Mem0 Platform's entity-scoped app_id.
-        # Domain partition: "evergreen" (evergreen-repo work) vs "meta" (everything
-        # else). Claude Code passes app_id explicitly (a PreToolUse hook enforces
-        # it); writers that don't specify one — e.g. the Hermes/Hal ops layer, which
-        # is always meta-domain — fall back to the default below so nothing escapes
-        # the partition untagged.
+        # Domain partition: "evergreen" (evergreen-repo work), "hal-ops" (Hal ops),
+        # "general" (everything else). Callers should pass app_id explicitly —
+        # Claude Code's PreToolUse hook and Hal's pre_tool_call guard both enforce
+        # it. The default below is a last-resort catch-all so nothing escapes the
+        # partition untagged; it is "general" (a real, readable domain) — NOT the
+        # retired "meta" name, which no actor reads.
         meta = dict(metadata) if metadata else {}
         if app_id:
             meta["app_id"] = app_id
-        meta.setdefault("app_id", "meta")
+        meta.setdefault("app_id", "general")
         kwargs["metadata"] = meta
         if infer is not None:
             kwargs["infer"] = infer
@@ -285,7 +287,7 @@ def _register_tools(mcp: FastMCP) -> None:
         app_id: Annotated[
             str | None,
             Field(
-                description="App/domain scope to filter by (e.g. 'evergreen' vs 'meta'). "
+                description="App/domain scope to filter by (e.g. 'evergreen' / 'general' / 'hal-ops'). "
                 "Matches the app_id stored in metadata at write time."
             ),
         ] = None,
@@ -347,7 +349,7 @@ def _register_tools(mcp: FastMCP) -> None:
         app_id: Annotated[
             str | None,
             Field(
-                description="App/domain scope to filter by (e.g. 'evergreen' vs 'meta')."
+                description="App/domain scope to filter by (e.g. 'evergreen' / 'general' / 'hal-ops')."
             ),
         ] = None,
         limit: Annotated[

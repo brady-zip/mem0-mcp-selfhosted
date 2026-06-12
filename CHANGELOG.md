@@ -1,6 +1,17 @@
 # CHANGELOG
 
 
+## v0.6.1 (2026-06-12)
+
+### Bug Fixes
+
+- `add_memory`: change the last-resort default `app_id` from `"meta"` (a retired bucket no actor
+  reads) to `"general"` (a real, readable domain). A write that omits `app_id` and bypasses the
+  caller-side guards previously landed in `"meta"` and was orphaned from recall; it now lands in
+  the `general` catch-all. Updated the `app_id` field descriptions on `add_memory` /
+  `search_memories` / `get_memories` to the current domains (`evergreen` / `general` / `hal-ops`).
+
+
 ## v0.6.0 (2026-06-11)
 
 ### Features
