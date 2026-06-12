@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 from collections import deque
@@ -132,6 +133,57 @@ def _extract_results(raw) -> list[dict]:
     return []
 
 
+def _filter_sets(user_id: str, recall_app_ids: list[str]) -> list[dict]:
+    """Build the per-app_id filter sets for a scoped recall.
+
+    When ``recall_app_ids`` is set, one filter per app_id (so mem0 2.x's
+    metadata app_id match applies per domain); otherwise a single user_id
+    filter (backward-compatible generic behaviour).
+    """
+    if recall_app_ids:
+        return [{"user_id": user_id, "app_id": app_id} for app_id in recall_app_ids]
+    return [{"user_id": user_id}]
+
+
+def _search_scoped(
+    mem,
+    queries: list[str],
+    user_id: str,
+    recall_app_ids: list[str],
+    top_k: int = 15,
+    max_total: int = _MAX_MEMORIES,
+    threshold: float | None = None,
+) -> list[dict]:
+    """Run each query against each app_id filter set, merged/deduped by id."""
+    seen_ids: set[str] = set()
+    out: list[dict] = []
+    for filters in _filter_sets(user_id, recall_app_ids):
+        for query in queries:
+            kwargs: dict = {"query": query, "filters": filters, "top_k": top_k}
+            if threshold is not None:
+                kwargs["threshold"] = threshold
+            for r in _extract_results(mem.search(**kwargs)):
+                mid = r.get("id")
+                if mid and mid not in seen_ids:
+                    seen_ids.add(mid)
+                    out.append(r)
+    return out[:max_total]
+
+
+def _emit_additional_context(event_name: str, context: str) -> None:
+    """Emit a hookSpecificOutput.additionalContext response for *event_name*.
+
+    This is the canonical shape for UserPromptSubmit / PreToolUse context
+    injection (matches Claude Code's documented hook output).
+    """
+    _output({
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": context,
+        }
+    })
+
+
 def context_main() -> None:
     """SessionStart hook: inject cross-session memories as additionalContext."""
     try:
@@ -145,43 +197,21 @@ def context_main() -> None:
 
         mem = _get_memory()
 
-        # --- Multi-query search with deduplication ---
-        seen_ids: set[str] = set()
-        all_memories: list[dict] = []
-
-        queries = [
-            f"project context, architecture, conventions for {project_name}",
-            f"recent session summary, decisions, key changes for {project_name}",
-        ]
-
-        # When MEM0_RECALL_APP_IDS is set, scope recall to those domain
-        # partitions (one filter set per app_id); otherwise filter on user_id
-        # alone (backward-compatible generic behaviour). Each filter is run
-        # against every query; the dedup-by-id loop below merges all results.
-        if recall_app_ids:
-            filter_sets = [
-                {"user_id": user_id, "app_id": app_id} for app_id in recall_app_ids
-            ]
-        else:
-            filter_sets = [{"user_id": user_id}]
-
-        for filters in filter_sets:
-            for query in queries:
-                # NOTE(fork): mem0ai 2.x search(query, *, top_k, filters, ...) takes
-                # entity scopes inside `filters` (not top-level) and uses `top_k`,
-                # not `limit` — same as server.py's search_memories tool. app_id is
-                # matched against the value persisted in the Qdrant payload.
-                results = _extract_results(
-                    mem.search(query=query, filters=filters, top_k=15)
-                )
-                for r in results:
-                    mid = r.get("id")
-                    if mid and mid not in seen_ids:
-                        seen_ids.add(mid)
-                        all_memories.append(r)
-
-        # Cap total injected memories
-        all_memories = all_memories[:_MAX_MEMORIES]
+        # Multi-query, multi-app_id search merged/deduped by id. NOTE(fork):
+        # mem0ai 2.x search(query, *, top_k, filters, ...) takes entity scopes
+        # inside `filters` (not top-level) and uses `top_k`; app_id is matched
+        # against the value persisted in the Qdrant payload.
+        all_memories = _search_scoped(
+            mem,
+            queries=[
+                f"project context, architecture, conventions for {project_name}",
+                f"recent session summary, decisions, key changes for {project_name}",
+            ],
+            user_id=user_id,
+            recall_app_ids=recall_app_ids,
+            top_k=15,
+            max_total=_MAX_MEMORIES,
+        )
 
         if not all_memories:
             _output(_nonfatal())
@@ -256,8 +286,59 @@ def _read_recent_messages(transcript_path: str) -> list[tuple[str, str]]:
     return list(messages)
 
 
+def _capture_summary(
+    transcript_path: str, session_id: str, project_name: str, source: str
+) -> None:
+    """Read the transcript, build a summary prompt, and store it in mem0.
+
+    Shared by the Stop and PreCompact hooks. Skips short transcripts. Tags the
+    memory with ``source`` and (when MEM0_APP_ID is set) the domain ``app_id``.
+    Returns silently — callers emit the hook response.
+    """
+    if not transcript_path or not Path(transcript_path).is_file():
+        return
+
+    recent = _read_recent_messages(transcript_path)
+
+    # Skip short sessions — AND means we save when *either* side contributed
+    # meaningful content (e.g. short question + long answer).
+    user_total = sum(len(c) for r, c in recent if r == "user")
+    asst_total = sum(len(c) for r, c in recent if r == "assistant")
+    if user_total < _MIN_USER_LEN and asst_total < _MIN_ASSISTANT_LEN:
+        return
+
+    exchanges = []
+    for role, content in recent:
+        label = "User" if role == "user" else "Assistant"
+        exchanges.append(f"[{label}]: {content}")
+
+    summary = (
+        f"Session summary for project '{project_name}':\n\n"
+        + "\n\n".join(exchanges)
+        + "\n\n"
+        "Extract key decisions, solutions found, patterns discovered, "
+        "configuration changes, and important context for future sessions."
+    )
+
+    metadata: dict = {"source": source, "session_id": session_id}
+    # When MEM0_APP_ID is set, tag with the domain partition so the memory
+    # lands in the right bucket and is filterable on recall. When unset, no
+    # app_id is written (backward-compatible generic case).
+    app_id = _get_app_id()
+    if app_id:
+        metadata["app_id"] = app_id
+
+    mem = _get_memory()
+    mem.add(
+        messages=[{"role": "user", "content": summary}],
+        user_id=_get_user_id(),
+        infer=True,
+        metadata=metadata,
+    )
+
+
 def stop_main() -> None:
-    """Stop hook: save session summary to mem0."""
+    """Stop hook: save a session summary to mem0 (source=session-stop-hook)."""
     try:
         hook_input = json.loads(sys.stdin.read())
 
@@ -266,67 +347,196 @@ def stop_main() -> None:
             _output(_nonfatal())
             return
 
-        session_id = hook_input.get("session_id", "")
-        transcript_path = hook_input.get("transcript_path", "")
         cwd = hook_input.get("cwd", "")
         project_name = Path(cwd).name if cwd else "project"
         if not project_name:
             project_name = "project"
 
-        # Missing / invalid transcript
-        if not transcript_path or not Path(transcript_path).is_file():
-            _output(_nonfatal())
-            return
-
-        recent = _read_recent_messages(transcript_path)
-
-        # Skip short sessions — AND means we save when *either* side
-        # contributed meaningful content (e.g. short question + long answer).
-        user_total = sum(len(c) for r, c in recent if r == "user")
-        asst_total = sum(len(c) for r, c in recent if r == "assistant")
-        if user_total < _MIN_USER_LEN and asst_total < _MIN_ASSISTANT_LEN:
-            _output(_nonfatal())
-            return
-
-        # Build summary prompt with recent exchanges
-        exchanges = []
-        for role, content in recent:
-            label = "User" if role == "user" else "Assistant"
-            exchanges.append(f"[{label}]: {content}")
-
-        summary = (
-            f"Session summary for project '{project_name}':\n\n"
-            + "\n\n".join(exchanges)
-            + "\n\n"
-            "Extract key decisions, solutions found, patterns discovered, "
-            "configuration changes, and important context for future sessions."
+        _capture_summary(
+            hook_input.get("transcript_path", ""),
+            hook_input.get("session_id", ""),
+            project_name,
+            "session-stop-hook",
         )
-
-        mem = _get_memory()
-        user_id = _get_user_id()
-        app_id = _get_app_id()
-
-        metadata: dict = {
-            "source": "session-stop-hook",
-            "session_id": session_id,
-        }
-        # When MEM0_APP_ID is set, tag the captured memory with the domain
-        # partition so it lands in the right bucket and is filterable on recall.
-        # When unset, no app_id is written (backward-compatible generic case).
-        if app_id:
-            metadata["app_id"] = app_id
-
-        mem.add(
-            messages=[{"role": "user", "content": summary}],
-            user_id=user_id,
-            infer=True,
-            metadata=metadata,
-        )
-
         _output(_nonfatal())
 
     except Exception:
         logger.debug("stop_main failed", exc_info=True)
+        _output(_nonfatal())
+
+
+# ---------------------------------------------------------------------------
+# PreCompact Hook
+# ---------------------------------------------------------------------------
+
+
+def precompact_main() -> None:
+    """PreCompact hook: capture a session-state summary before compaction.
+
+    Same capture path as Stop but tagged ``source=pre-compact-hook`` and fired
+    mid-session (when context is about to be lost to compaction), so a resume
+    after compaction can recall what was in flight. Silent (no output beyond
+    the non-fatal ack).
+    """
+    try:
+        hook_input = json.loads(sys.stdin.read())
+        cwd = hook_input.get("cwd", "")
+        project_name = Path(cwd).name if cwd else "project"
+        if not project_name:
+            project_name = "project"
+        _capture_summary(
+            hook_input.get("transcript_path", ""),
+            hook_input.get("session_id", ""),
+            project_name,
+            "pre-compact-hook",
+        )
+    except Exception:
+        logger.debug("precompact_main failed", exc_info=True)
+    _output(_nonfatal())
+
+
+# ---------------------------------------------------------------------------
+# UserPromptSubmit Hook
+# ---------------------------------------------------------------------------
+
+_PROMPT_MIN_LEN = 20
+_RESUME_RE = re.compile(
+    r"(where (did )?(we|i) (leave|left) off|continue (from )?(where|last)|"
+    r"what were we (working|doing)|pick up where|resume|"
+    r"what.?s the (current|latest) (state|status)|catch me up|where are we)",
+    re.IGNORECASE,
+)
+
+
+def prompt_main() -> None:
+    """UserPromptSubmit hook: search-decision rubric + resume-intent recall.
+
+    Recall and prose only — this hook never CAPTURES (no blind auto-capture),
+    so it adds no duplication. On resume-intent it pre-searches mem0 (scoped to
+    MEM0_RECALL_APP_IDS) and injects the recovered context; once per session it
+    injects a short rubric steering the agent to search mem0 itself.
+    """
+    try:
+        hook_input = json.loads(sys.stdin.read())
+        prompt = hook_input.get("prompt", "") or ""
+        if len(prompt) < _PROMPT_MIN_LEN:
+            _output(_nonfatal())
+            return
+
+        session_id = hook_input.get("session_id", "") or "default"
+        user_id = _get_user_id()
+        recall_app_ids = _get_recall_app_ids()
+        parts: list[str] = []
+
+        # Resume-intent → actually pre-search mem0 and inject.
+        if _RESUME_RE.search(prompt):
+            mem = _get_memory()
+            mems = _search_scoped(
+                mem,
+                queries=[
+                    "session state, current task, work in progress",
+                    "recent decisions, key changes, and learnings",
+                ],
+                user_id=user_id,
+                recall_app_ids=recall_app_ids,
+                top_k=5,
+                max_total=6,
+            )
+            if mems:
+                lines = ["# mem0 — recovered context for resuming:"]
+                for i, m in enumerate(mems, 1):
+                    lines.append(f"{i}. {m.get('memory', m.get('text', ''))}")
+                parts.append("\n".join(lines))
+
+        # Once-per-session search rubric (flag file keyed on session id).
+        flag = os.path.join(tempfile.gettempdir(), f"mem0_rubric_{session_id}")
+        if not os.path.exists(flag):
+            parts.append(
+                "Mem0 recall: when a prompt references past work, a decision, an "
+                "error, or a non-trivial task, search mem0 first "
+                "(mcp__mem0__search_memories, scoped to this session's app_id) "
+                "before answering or asking the user."
+            )
+            try:
+                open(flag, "w").close()
+            except OSError:
+                pass
+
+        if parts:
+            _emit_additional_context("UserPromptSubmit", "\n\n".join(parts))
+        else:
+            _output(_nonfatal())
+
+    except Exception:
+        logger.debug("prompt_main failed", exc_info=True)
+        _output(_nonfatal())
+
+
+# ---------------------------------------------------------------------------
+# File-Context Hook  (PreToolUse: Read)
+# ---------------------------------------------------------------------------
+
+_FILE_CONTEXT_MIN_BYTES = 1500
+_FILE_CONTEXT_MAX = 5
+
+
+def file_context_main() -> None:
+    """PreToolUse(Read) hook: inject prior mem0 context about the file.
+
+    Gates files >= _FILE_CONTEXT_MIN_BYTES, searches mem0 (app_id-scoped) for
+    the file path, and injects a compact list of prior memories. Recall only —
+    never blocks the Read, never captures.
+    """
+    try:
+        hook_input = json.loads(sys.stdin.read())
+        tool_input = hook_input.get("tool_input", {}) or {}
+        file_path = tool_input.get("file_path") or tool_input.get("path") or ""
+        cwd = hook_input.get("cwd", "") or os.getcwd()
+        if not file_path:
+            _output(_nonfatal())
+            return
+
+        p = Path(file_path)
+        if not p.is_absolute():
+            p = Path(cwd) / p
+        try:
+            if not p.is_file() or p.stat().st_size < _FILE_CONTEXT_MIN_BYTES:
+                _output(_nonfatal())
+                return
+        except OSError:
+            _output(_nonfatal())
+            return
+
+        try:
+            rel = os.path.relpath(str(p), cwd)
+        except ValueError:
+            rel = str(p)
+        basename = p.name
+        query = f"{rel} {basename}" if rel != basename else rel
+
+        mem = _get_memory()
+        mems = _search_scoped(
+            mem,
+            queries=[query],
+            user_id=_get_user_id(),
+            recall_app_ids=_get_recall_app_ids(),
+            top_k=_FILE_CONTEXT_MAX,
+            max_total=_FILE_CONTEXT_MAX,
+            threshold=0.3,
+        )
+        if not mems:
+            _output(_nonfatal())
+            return
+
+        lines = [f"Prior mem0 context for `{rel}` ({len(mems)} memories):"]
+        for m in mems:
+            text = (m.get("memory", m.get("text", "")) or "")[:150]
+            text = text.replace("\n", " ").strip()
+            lines.append(f"- {text}")
+        _emit_additional_context("PreToolUse", "\n".join(lines))
+
+    except Exception:
+        logger.debug("file_context_main failed", exc_info=True)
         _output(_nonfatal())
 
 

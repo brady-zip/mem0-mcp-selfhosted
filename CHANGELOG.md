@@ -1,6 +1,26 @@
 # CHANGELOG
 
 
+## v0.6.0 (2026-06-11)
+
+### Features
+
+- Add three richer lifecycle hook entry points (all app_id-aware, recall-scoped via
+  `MEM0_RECALL_APP_IDS` / tagged via `MEM0_APP_ID`):
+  - `mem0-hook-prompt` (`prompt_main`, UserPromptSubmit) — injects a once-per-session search
+    rubric and, on resume-intent ("where did we leave off", "catch me up", …), pre-searches mem0
+    and injects the recovered context. Recall/prose only — never captures, so it adds no
+    duplication.
+  - `mem0-hook-filecontext` (`file_context_main`, PreToolUse: Read) — for files >= 1500 bytes,
+    searches mem0 for the file path and injects a compact "prior work" list. Recall only.
+  - `mem0-hook-precompact` (`precompact_main`, PreCompact) — captures a session-state summary
+    before compaction, tagged `source=pre-compact-hook`, so a resume after compaction can recall
+    what was in flight. Shares the capture path with the Stop hook (`_capture_summary`).
+- Factor the multi-query / multi-app_id search into `_search_scoped()` (used by `context_main`,
+  `prompt_main`, `file_context_main`) and add `_emit_additional_context()` for the
+  hookSpecificOutput context shape.
+
+
 ## v0.5.0 (2026-06-11)
 
 ### Features
