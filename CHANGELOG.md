@@ -1,6 +1,25 @@
 # CHANGELOG
 
 
+## v0.7.0 (2026-06-18)
+
+### Features
+
+- Stop / PreCompact hooks now write a **resume-recap handoff file** in addition to capturing the
+  mem0 session summary. On each meaningful turn (same gate as `_capture_summary`), the hook makes
+  one synthesis call via mem0's configured chat LLM (`mem.llm.generate_response`, provider-agnostic),
+  augmented with a scoped mem0 recall, and writes a tight markdown handoff (Goal / State / Next /
+  Watch-out) plus a `git status` appendix. The file path is surfaced to the user via the hook
+  response `systemMessage` (the grayed terminal line), so a cold-context resume can `read` it
+  instead of reloading the whole conversation.
+  - Path is deterministic and **keyed by cwd, not session_id** (session_id is unstable across hook
+    types, so a session-keyed file can't be found on resume); worktrees sharing a project name are
+    disambiguated by a cwd hash. Lives under `~/.local/share/mem0-brady/handoffs/` (override with
+    `MEM0_HANDOFF_DIR`), overwritten each meaningful turn so it always reflects the latest state.
+  - Fail-open throughout: any synthesis / write error is swallowed and the hook still returns its
+    normal non-fatal response.
+
+
 ## v0.6.1 (2026-06-12)
 
 ### Bug Fixes

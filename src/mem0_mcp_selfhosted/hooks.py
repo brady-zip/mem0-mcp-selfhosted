@@ -8,13 +8,16 @@ Three entry points registered in pyproject.toml:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -40,6 +43,9 @@ _MIN_USER_LEN = 20
 _MIN_ASSISTANT_LEN = 50
 _MAX_CONTENT_LEN = 4000
 _RECENT_WINDOW = 6  # last ~3 exchanges (user+assistant pairs)
+
+_HANDOFF_DIR_ENV = "MEM0_HANDOFF_DIR"
+_HANDOFF_RECALL_MAX = 4  # mem0 memories folded into the synthesis prompt
 
 
 def _get_user_id() -> str:
@@ -276,27 +282,201 @@ def _read_recent_messages(transcript_path: str) -> list[tuple[str, str]]:
             except json.JSONDecodeError:
                 continue
 
-            role = entry.get("role", "")
+            # Skip subagent (sidechain) turns — internal to a Task run.
+            if entry.get("isSidechain"):
+                continue
+
+            # Claude Code transcripts wrap the message:
+            #   {"type": "user"|"assistant", "message": {"role", "content"}}
+            # plus many non-message line types (mode, attachment, snapshots…).
+            # Older/synthetic transcripts use a flat {"role", "content"}.
+            # Support both by reading from .message when present, else top-level.
+            msg = entry.get("message")
+            src = msg if isinstance(msg, dict) else entry
+            role = src.get("role", "")
             if role not in ("user", "assistant"):
                 continue
-            content = _extract_content(entry.get("content", ""))[:_MAX_CONTENT_LEN]
+            # _extract_content keeps only text blocks, so tool_use / tool_result
+            # entries naturally collapse to "" and are skipped below.
+            content = _extract_content(src.get("content", ""))[:_MAX_CONTENT_LEN]
             if content:
                 messages.append((role, content))
 
     return list(messages)
 
 
+def _handoff_dir() -> Path:
+    """Resolve the directory handoff files are written to.
+
+    Override with ``MEM0_HANDOFF_DIR``; otherwise XDG data home (defaulting to
+    ``~/.local/share``) under ``mem0-brady/handoffs``. Kept alongside the
+    plugin's other data so a SessionStart pointer can find the latest one.
+    """
+    override = os.environ.get(_HANDOFF_DIR_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    xdg = os.environ.get("XDG_DATA_HOME", "").strip()
+    root = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "share"
+    return root / "mem0-brady" / "handoffs"
+
+
+def _handoff_path_for(cwd: str, project_name: str) -> Path:
+    """Deterministic handoff path keyed by cwd (NOT session_id).
+
+    The hook-payload session_id is not stable across hook types within one
+    Claude session, so a file keyed on it can't be found on resume. cwd is
+    stable and also separates worktrees that share a project name (the path
+    hash disambiguates them).
+    """
+    key = cwd or project_name
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", project_name).strip("-") or "project"
+    return _handoff_dir() / f"{safe}-{digest}.md"
+
+
+def _git_status_block(cwd: str) -> str:
+    """Best-effort ``git status -sb`` (truncated) for the handoff appendix.
+
+    Returns "" when cwd isn't a git repo or git is unavailable — never raises.
+    """
+    if not cwd:
+        return ""
+    try:
+        out = subprocess.run(
+            ["git", "-C", cwd, "status", "-sb"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if out.returncode != 0:
+        return ""
+    return "\n".join(out.stdout.strip().splitlines()[:15])
+
+
+def _synthesize_handoff(
+    mem, recent: list[tuple[str, str]], project_name: str
+) -> str:
+    """One LLM call turning the recent transcript + mem0 recall into a recap.
+
+    Uses mem0's already-configured chat LLM (provider-agnostic via
+    ``mem.llm.generate_response``). Returns "" on any failure so the caller can
+    skip writing the file.
+    """
+    convo = "\n\n".join(
+        f"[{'User' if r == 'user' else 'Assistant'}]: {c}" for r, c in recent
+    )
+
+    # "augment with mem0": fold a scoped recall into the synthesis context so
+    # the recap is informed by long-term memory, not just the last few turns.
+    recalled_block = "(none)"
+    try:
+        mems = _search_scoped(
+            mem,
+            queries=[
+                "session state, current task, work in progress, recent decisions"
+            ],
+            user_id=_get_user_id(),
+            recall_app_ids=_get_recall_app_ids(),
+            top_k=_HANDOFF_RECALL_MAX,
+            max_total=_HANDOFF_RECALL_MAX,
+        )
+        if mems:
+            recalled_block = "\n".join(
+                f"- {m.get('memory', m.get('text', ''))}" for m in mems
+            )
+    except Exception:
+        logger.debug("handoff recall failed", exc_info=True)
+
+    prompt = (
+        "You are writing a terse resume handoff so a future agent (or the same "
+        "user returning to a cold context) can pick up a coding session "
+        "immediately. Be concrete: name files, PR numbers, identifiers.\n\n"
+        f"## Recent conversation (oldest first), project '{project_name}':\n"
+        f"{convo}\n\n"
+        f"## Relevant long-term memory:\n{recalled_block}\n\n"
+        "Write markdown under ~180 words, omitting any section that does not "
+        "apply, with these headers:\n"
+        "- **Goal** — the overarching objective in one sentence.\n"
+        "- **State** — what is done/shipped so far (bullets).\n"
+        "- **Next** — the immediate next step(s).\n"
+        "- **Watch out** — gotchas, blockers, or pending user decisions.\n"
+        "Start directly with the **Goal** line — no document title, no "
+        "preamble, no closing remarks."
+    )
+
+    try:
+        resp = mem.llm.generate_response(
+            messages=[{"role": "user", "content": prompt}]
+        )
+    except Exception:
+        logger.debug("handoff synthesis failed", exc_info=True)
+        return ""
+
+    # generate_response returns a str on the no-tools path across providers,
+    # but be defensive about a dict-shaped return.
+    if isinstance(resp, dict):
+        resp = resp.get("content") or resp.get("text") or ""
+    return (resp or "").strip()
+
+
+def _write_handoff(
+    mem,
+    recent: list[tuple[str, str]],
+    project_name: str,
+    cwd: str,
+    source: str,
+) -> Path | None:
+    """Synthesize and write the handoff markdown. Returns its path or None.
+
+    Fail-open: any error is swallowed (logged) and returns None so the Stop /
+    PreCompact response is never broken.
+    """
+    try:
+        body = _synthesize_handoff(mem, recent, project_name)
+        if not body:
+            return None
+
+        path = _handoff_path_for(cwd, project_name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        parts = [
+            "<!-- mem0-brady handoff (auto-written; overwritten each meaningful turn) -->",
+            f"# Handoff — {project_name}",
+            "",
+            f"- generated: {ts} (source: {source})",
+            f"- cwd: `{cwd}`",
+            "",
+            body,
+        ]
+        git_block = _git_status_block(cwd)
+        if git_block:
+            parts += ["", "---", "### git status", "```", git_block, "```"]
+        path.write_text("\n".join(parts) + "\n", encoding="utf-8")
+        return path
+    except Exception:
+        logger.debug("_write_handoff failed", exc_info=True)
+        return None
+
+
 def _capture_summary(
-    transcript_path: str, session_id: str, project_name: str, source: str
-) -> None:
-    """Read the transcript, build a summary prompt, and store it in mem0.
+    transcript_path: str,
+    session_id: str,
+    project_name: str,
+    source: str,
+    cwd: str = "",
+) -> Path | None:
+    """Read the transcript, store a summary in mem0, and write a handoff file.
 
     Shared by the Stop and PreCompact hooks. Skips short transcripts. Tags the
-    memory with ``source`` and (when MEM0_APP_ID is set) the domain ``app_id``.
-    Returns silently — callers emit the hook response.
+    mem0 memory with ``source`` and (when MEM0_APP_ID is set) the domain
+    ``app_id``. Returns the handoff file path (for the caller's systemMessage)
+    or None when nothing meaningful was captured / written.
     """
     if not transcript_path or not Path(transcript_path).is_file():
-        return
+        return None
 
     recent = _read_recent_messages(transcript_path)
 
@@ -305,7 +485,7 @@ def _capture_summary(
     user_total = sum(len(c) for r, c in recent if r == "user")
     asst_total = sum(len(c) for r, c in recent if r == "assistant")
     if user_total < _MIN_USER_LEN and asst_total < _MIN_ASSISTANT_LEN:
-        return
+        return None
 
     exchanges = []
     for role, content in recent:
@@ -336,6 +516,10 @@ def _capture_summary(
         metadata=metadata,
     )
 
+    # Resume-recap handoff (reuses the messages already read + the same mem
+    # instance). Fail-open inside _write_handoff.
+    return _write_handoff(mem, recent, project_name, cwd, source)
+
 
 def stop_main() -> None:
     """Stop hook: save a session summary to mem0 (source=session-stop-hook)."""
@@ -352,13 +536,17 @@ def stop_main() -> None:
         if not project_name:
             project_name = "project"
 
-        _capture_summary(
+        handoff = _capture_summary(
             hook_input.get("transcript_path", ""),
             hook_input.get("session_id", ""),
             project_name,
             "session-stop-hook",
+            cwd,
         )
-        _output(_nonfatal())
+        resp = _nonfatal()
+        if handoff:
+            resp["systemMessage"] = f"handoff → {handoff}"
+        _output(resp)
 
     except Exception:
         logger.debug("stop_main failed", exc_info=True)
@@ -384,15 +572,20 @@ def precompact_main() -> None:
         project_name = Path(cwd).name if cwd else "project"
         if not project_name:
             project_name = "project"
-        _capture_summary(
+        handoff = _capture_summary(
             hook_input.get("transcript_path", ""),
             hook_input.get("session_id", ""),
             project_name,
             "pre-compact-hook",
+            cwd,
         )
+        resp = _nonfatal()
+        if handoff:
+            resp["systemMessage"] = f"handoff → {handoff}"
+        _output(resp)
     except Exception:
         logger.debug("precompact_main failed", exc_info=True)
-    _output(_nonfatal())
+        _output(_nonfatal())
 
 
 # ---------------------------------------------------------------------------
