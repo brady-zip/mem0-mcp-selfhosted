@@ -69,6 +69,27 @@ def register_providers(providers_info: list[ProviderInfo]) -> None:
         )
 
 
+def register_reranker(config_dict: dict) -> None:
+    """Register OllamaReranker with RerankerFactory when provider is 'ollama'.
+
+    RerankerFactory has no register_provider() method (unlike LlmFactory).
+    Direct mutation of provider_to_class is the only supported extension mechanism.
+    Safe to call multiple times (dict assignment is idempotent).
+    """
+    if config_dict.get("reranker", {}).get("provider") != "ollama":
+        return
+
+    from mem0.utils.factory import RerankerFactory
+
+    from mem0_mcp_selfhosted.reranker_ollama import OllamaReranker, OllamaRerankerConfig
+
+    RerankerFactory.provider_to_class["ollama"] = (
+        "mem0_mcp_selfhosted.reranker_ollama.OllamaReranker",
+        OllamaRerankerConfig,
+    )
+    logger.info("Registered OllamaReranker with RerankerFactory")
+
+
 def _resolve_config_class(provider_name: str) -> type | None:
     """Lazy-resolve the config class for a provider name.
 
@@ -93,6 +114,7 @@ def _init_memory() -> Any:
     config_dict, providers_info, split_config = build_config()
 
     register_providers(providers_info)
+    register_reranker(config_dict)
 
     # Patch mem0ai's relationship sanitizer before Memory init
     patch_graph_sanitizer()

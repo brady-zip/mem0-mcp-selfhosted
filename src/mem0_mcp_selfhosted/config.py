@@ -146,6 +146,9 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
                 client_kwargs["api_key"] = qdrant_api_key
             vector_config["client"] = QdrantClient(**client_kwargs)
 
+    # --- Reranker (optional, self-hosted via Ollama v0.5.3+) ---
+    rerank_provider = opt_env("MEM0_RERANK_PROVIDER")
+
     # --- History ---
     history_db_path = opt_env("MEM0_HISTORY_DB_PATH")
 
@@ -168,6 +171,15 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
 
     if history_db_path:
         config_dict["history_db_path"] = history_db_path
+
+    if rerank_provider:
+        rerank_cfg: dict[str, Any] = {}
+        rerank_model = opt_env("MEM0_RERANK_MODEL")
+        if rerank_model:
+            rerank_cfg["model"] = rerank_model
+        if rerank_provider == "ollama":
+            rerank_cfg["ollama_base_url"] = _resolve_ollama_url("MEM0_RERANK_URL")
+        config_dict["reranker"] = {"provider": rerank_provider, "config": rerank_cfg}
 
     # --- Graph Store (conditional) ---
     enable_graph = bool_env("MEM0_ENABLE_GRAPH")

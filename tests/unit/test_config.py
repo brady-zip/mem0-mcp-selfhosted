@@ -733,3 +733,41 @@ class TestBuildConfig:
         assert config_dict["embedder"]["config"]["ollama_base_url"] == "http://192.168.0.208:11434"
         assert config_dict["graph_store"]["llm"]["provider"] == "ollama"
         assert config_dict["graph_store"]["llm"]["config"]["ollama_base_url"] == "http://192.168.0.208:11434"
+
+    # --- Reranker config (15.x) ---
+
+    def test_reranker_absent_by_default(self):
+        """No reranker in config_dict when MEM0_RERANK_PROVIDER is not set."""
+        config_dict, *_ = self._build_with_env({})
+        assert "reranker" not in config_dict
+
+    def test_reranker_ollama_provider(self):
+        """MEM0_RERANK_PROVIDER=ollama adds reranker block with provider and config."""
+        config_dict, *_ = self._build_with_env({"MEM0_RERANK_PROVIDER": "ollama"})
+        assert "reranker" in config_dict
+        assert config_dict["reranker"]["provider"] == "ollama"
+        assert isinstance(config_dict["reranker"]["config"], dict)
+
+    def test_reranker_model_propagates(self):
+        """MEM0_RERANK_MODEL propagates to config['config']['model']."""
+        env = {"MEM0_RERANK_PROVIDER": "ollama", "MEM0_RERANK_MODEL": "bge-reranker-v2-m3"}
+        config_dict, *_ = self._build_with_env(env)
+        assert config_dict["reranker"]["config"]["model"] == "bge-reranker-v2-m3"
+
+    def test_reranker_url_propagates(self):
+        """MEM0_RERANK_URL propagates to config['config']['ollama_base_url']."""
+        env = {"MEM0_RERANK_PROVIDER": "ollama", "MEM0_RERANK_URL": "http://gpu:11434"}
+        config_dict, *_ = self._build_with_env(env)
+        assert config_dict["reranker"]["config"]["ollama_base_url"] == "http://gpu:11434"
+
+    def test_reranker_url_falls_back_to_ollama_url(self):
+        """When MEM0_RERANK_URL absent, falls back to MEM0_OLLAMA_URL."""
+        env = {"MEM0_RERANK_PROVIDER": "ollama", "MEM0_OLLAMA_URL": "http://nas:11434"}
+        config_dict, *_ = self._build_with_env(env)
+        assert config_dict["reranker"]["config"]["ollama_base_url"] == "http://nas:11434"
+
+    def test_reranker_url_falls_back_to_default(self):
+        """When no URL env vars set, ollama_base_url defaults to localhost."""
+        env = {"MEM0_RERANK_PROVIDER": "ollama"}
+        config_dict, *_ = self._build_with_env(env)
+        assert config_dict["reranker"]["config"]["ollama_base_url"] == "http://localhost:11434"

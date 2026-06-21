@@ -29,13 +29,16 @@ Self-hosted MCP server using `mem0ai` as a library. 11 tools (9 memory + 2 graph
 - `auth.py` — 3-tier token fallback: `MEM0_ANTHROPIC_TOKEN` → `~/.claude/.credentials.json` → `ANTHROPIC_API_KEY`
 - `llm_anthropic.py` — Custom Anthropic provider registered with mem0ai's `LlmFactory`; handles OAT headers, structured outputs (JSON schema via `output_config`), and tool-call parsing
 - `llm_router.py` — `SplitModelGraphLLM` routes by tool name: extraction tools → Gemini, contradiction tools → Claude
-- `helpers.py` — `_mem0_call()` error wrapper, `call_with_graph()` threading lock for per-call graph toggle, `safe_bulk_delete()` iterates+deletes individually (never calls `memory.delete_all()`), `patch_graph_sanitizer()` monkey-patches mem0ai's relationship sanitizer for Neo4j compliance
+- `reranker_ollama.py` — `OllamaReranker` + `OllamaRerankerConfig`: registered with mem0ai's `RerankerFactory` at startup when `MEM0_RERANK_PROVIDER=ollama`. Uses `httpx` to call Ollama's `/api/rerank` endpoint (v0.5.3+). Requires `ollama pull bge-reranker-v2-m3`.
+- `helpers.py` — `_mem0_call()` error wrapper, `call_with_graph()` threading lock for per-call graph toggle (fast-paths when no graph store configured), `safe_bulk_delete()` iterates+deletes individually (never calls `memory.delete_all()`), `patch_graph_sanitizer()` monkey-patches mem0ai's relationship sanitizer for Neo4j compliance
 - `graph_tools.py` — Direct Neo4j Cypher queries with lazy driver init
 - `__init__.py` — Suppresses mem0ai telemetry before any imports
 
 **Critical implementation details:**
 - `memory.delete()` does NOT clean Neo4j nodes (mem0ai bug #3245) — `safe_bulk_delete()` explicitly calls `memory.graph.delete_all(filters)` after
-- `memory.enable_graph` is mutable instance state — `call_with_graph()` holds a `threading.Lock` for the full duration of each Memory call (2-20s)
+- `memory.enable_graph` is mutable instance state — `call_with_graph()` holds a `threading.Lock` for the full duration of each Memory call (2-20s) when graph is active; fast-paths with no lock when `memory.graph is None` (enables concurrent 4-worktree use without Neo4j)
+- `RerankerFactory` has no `register_provider()` — unlike `LlmFactory`, it must be extended by direct mutation of `RerankerFactory.provider_to_class`. Done in `server.register_reranker()` before `Memory.from_config()`.
+- Reranking is opt-in: `search_memories(rerank=True)` only reranks if `MEM0_RERANK_PROVIDER` is set; otherwise mem0ai silently skips it when `memory.reranker is None`
 - Contract tests (`tests/contract/`) validate mem0ai internal API assumptions — if these fail after a mem0ai upgrade, the code needs updating
 - `Memory.update()` uses `data=` parameter, not `text=`
 - Structured output support requires claude-opus-4/sonnet-4/haiku-4 models; older models fall back to JSON extraction

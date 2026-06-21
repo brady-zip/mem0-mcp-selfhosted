@@ -177,3 +177,78 @@ class TestOllamaLLMInterface:
             "INVARIANT BROKEN: OllamaLLM.__init__ must accept a 'config' parameter. "
             f"Our OllamaToolLLM inherits __init__ from it. Found params: {params}"
         )
+
+
+class TestRerankerFactoryInterface:
+    """Validate RerankerFactory internals our OllamaReranker registration depends on."""
+
+    def test_reranker_factory_has_provider_to_class(self):
+        """RerankerFactory.provider_to_class is a class-level dict we can mutate."""
+        try:
+            from mem0.utils.factory import RerankerFactory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        assert hasattr(RerankerFactory, "provider_to_class"), (
+            "INVARIANT BROKEN: RerankerFactory must have provider_to_class dict. "
+            "Our register_reranker() mutates it to register OllamaReranker."
+        )
+        assert isinstance(RerankerFactory.provider_to_class, dict)
+
+    def test_provider_to_class_tuple_format(self):
+        """Built-in entries are 2-tuples (class_path_str, ConfigClass) — our format matches."""
+        try:
+            from mem0.utils.factory import RerankerFactory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        for name, value in RerankerFactory.provider_to_class.items():
+            assert isinstance(value, tuple) and len(value) == 2, (
+                f"INVARIANT BROKEN: RerankerFactory.provider_to_class[{name!r}] must be "
+                f"a 2-tuple (class_path_str, ConfigClass). Got: {value!r}"
+            )
+            class_path, config_class = value
+            assert isinstance(class_path, str), (
+                f"First element of tuple for {name!r} must be a string class path"
+            )
+            break  # Only need to check one existing entry
+
+    def test_provider_to_class_mutation_persists(self):
+        """Mutations to provider_to_class persist for the lifetime of the process."""
+        try:
+            from mem0.utils.factory import RerankerFactory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        _test_key = "_contract_test_ollama_reranker"
+        RerankerFactory.provider_to_class[_test_key] = ("fake.path.Class", None)
+        try:
+            assert _test_key in RerankerFactory.provider_to_class, (
+                "INVARIANT BROKEN: RerankerFactory.provider_to_class mutations must persist. "
+                "Our register_reranker() depends on this."
+            )
+        finally:
+            RerankerFactory.provider_to_class.pop(_test_key, None)
+
+    def test_base_reranker_config_is_pydantic(self):
+        """BaseRerankerConfig is a Pydantic BaseModel (our OllamaRerankerConfig extends it)."""
+        try:
+            from mem0.configs.rerankers.base import BaseRerankerConfig
+            from pydantic import BaseModel
+        except ImportError:
+            pytest.skip("mem0ai or pydantic not installed")
+
+        assert issubclass(BaseRerankerConfig, BaseModel), (
+            "INVARIANT BROKEN: BaseRerankerConfig must be a Pydantic BaseModel. "
+            "OllamaRerankerConfig inherits from it."
+        )
+
+    def test_reranker_factory_create_raises_for_unknown_provider(self):
+        """RerankerFactory.create() raises ValueError for unknown providers."""
+        try:
+            from mem0.utils.factory import RerankerFactory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        with pytest.raises((ValueError, Exception)):
+            RerankerFactory.create("_definitely_not_a_real_provider_xyz")

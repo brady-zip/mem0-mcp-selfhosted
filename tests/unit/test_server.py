@@ -512,3 +512,56 @@ class TestToolsWithNoMemory:
         result = fn(memory_id="uuid-123")
         parsed = json.loads(result)
         assert parsed["error"] == "Memory not initialized"
+
+
+# ============================================================
+# register_reranker tests
+# ============================================================
+
+
+class TestRegisterReranker:
+    def setup_method(self):
+        """Clean up any 'ollama' key injected by previous test runs."""
+        try:
+            from mem0.utils.factory import RerankerFactory
+            RerankerFactory.provider_to_class.pop("ollama", None)
+        except ImportError:
+            pass
+
+    def test_registers_ollama_when_provider_is_ollama(self):
+        from mem0.utils.factory import RerankerFactory
+        from mem0_mcp_selfhosted.server import register_reranker
+
+        register_reranker({"reranker": {"provider": "ollama"}})
+        assert "ollama" in RerankerFactory.provider_to_class
+        class_path, config_class = RerankerFactory.provider_to_class["ollama"]
+        assert "OllamaReranker" in class_path
+
+    def test_noop_when_reranker_absent(self):
+        from mem0.utils.factory import RerankerFactory
+        from mem0_mcp_selfhosted.server import register_reranker
+
+        before = set(RerankerFactory.provider_to_class.keys())
+        register_reranker({})
+        after = set(RerankerFactory.provider_to_class.keys())
+        assert after == before
+
+    def test_noop_for_non_ollama_provider(self):
+        from mem0.utils.factory import RerankerFactory
+        from mem0_mcp_selfhosted.server import register_reranker
+
+        before = set(RerankerFactory.provider_to_class.keys())
+        register_reranker({"reranker": {"provider": "cohere"}})
+        after = set(RerankerFactory.provider_to_class.keys())
+        # "ollama" should not have been added
+        assert "ollama" not in after - before
+
+    def test_idempotent_double_registration(self):
+        from mem0.utils.factory import RerankerFactory
+        from mem0_mcp_selfhosted.server import register_reranker
+
+        register_reranker({"reranker": {"provider": "ollama"}})
+        first_value = RerankerFactory.provider_to_class["ollama"]
+        register_reranker({"reranker": {"provider": "ollama"}})
+        second_value = RerankerFactory.provider_to_class["ollama"]
+        assert first_value == second_value
