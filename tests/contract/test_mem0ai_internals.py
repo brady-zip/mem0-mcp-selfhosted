@@ -121,6 +121,107 @@ class TestLlmFactoryRegistration:
             )
 
 
+class TestEmbedderFactoryRegistration:
+    """EmbedderFactory has NO register_provider(); we mutate provider_to_class.
+
+    register_embedders() depends on (a) provider_to_class being a plain mutable
+    dict of provider->class-path strings, and (b) create() lazy-importing that
+    path via load_class(). If either changes, our ZeroEntropy embedder breaks.
+    """
+
+    def test_provider_to_class_is_mutable_str_map(self):
+        try:
+            from mem0.utils.factory import EmbedderFactory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        pmap = EmbedderFactory.provider_to_class
+        assert isinstance(pmap, dict), (
+            "INVARIANT BROKEN: EmbedderFactory.provider_to_class must be a dict. "
+            "register_embedders() inserts a key into it."
+        )
+        # Native providers are registered as dotted class-path strings (load_class
+        # imports them lazily) — our zeroentropy entry follows the same shape.
+        assert isinstance(pmap["openai"], str), (
+            "INVARIANT BROKEN: EmbedderFactory maps provider -> class-path string."
+        )
+
+    def test_no_register_provider_method(self):
+        """EmbedderFactory lacks register_provider (why we mutate the dict)."""
+        try:
+            from mem0.utils.factory import EmbedderFactory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        assert not hasattr(EmbedderFactory, "register_provider"), (
+            "EmbedderFactory grew a register_provider(); register_embedders() "
+            "should switch to it instead of mutating provider_to_class."
+        )
+
+
+class TestZeroEntropyReranker:
+    """mem0ai ships a built-in zero_entropy reranker our config wires up."""
+
+    def test_zero_entropy_registered(self):
+        try:
+            from mem0.utils.factory import RerankerFactory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        assert "zero_entropy" in RerankerFactory.provider_to_class, (
+            "INVARIANT BROKEN: mem0ai must pre-register the 'zero_entropy' reranker."
+        )
+
+    def test_zero_entropy_config_accepts_api_key_model_top_k(self):
+        try:
+            from mem0.configs.rerankers.zero_entropy import ZeroEntropyRerankerConfig
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        cfg = ZeroEntropyRerankerConfig(api_key="k", model="zerank-1", top_k=5)
+        assert cfg.api_key == "k"
+        assert cfg.model == "zerank-1"
+        assert cfg.top_k == 5
+
+
+class TestZeroEntropyEmbedSDK:
+    """ZeroEntropy embed SDK shape our custom embedder depends on.
+
+    Skipped unless the optional 'zeroentropy' package is installed.
+    """
+
+    def test_models_embed_signature(self):
+        try:
+            from zeroentropy.resources.models import ModelsResource
+        except ImportError:
+            pytest.skip("zeroentropy not installed")
+
+        import inspect
+
+        params = inspect.signature(ModelsResource.embed).parameters
+        for required in ("input", "input_type", "model"):
+            assert required in params, (
+                f"INVARIANT BROKEN: ZeroEntropy embed() must accept '{required}'."
+            )
+        assert "dimensions" in params, (
+            "INVARIANT BROKEN: ZeroEntropy embed() must accept 'dimensions' "
+            "(matryoshka width our embedder forwards)."
+        )
+
+    def test_embed_response_has_results_embedding(self):
+        try:
+            from zeroentropy.types.model_embed_response import ModelEmbedResponse, Result
+        except ImportError:
+            pytest.skip("zeroentropy not installed")
+
+        assert "results" in ModelEmbedResponse.model_fields, (
+            "INVARIANT BROKEN: ModelEmbedResponse must expose .results."
+        )
+        assert "embedding" in Result.model_fields, (
+            "INVARIANT BROKEN: each embed Result must expose .embedding."
+        )
+
+
 class TestMemoryGraphAttribute:
     """mem0ai 2.0.7 dropped Memory.graph / Memory.enable_graph.
 

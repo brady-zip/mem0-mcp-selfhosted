@@ -770,3 +770,98 @@ class TestBuildConfig:
         """Any provider string is accepted (e.g. huggingface) — no enum guard."""
         config_dict, *_ = self._build_with_env({"MEM0_RERANK_PROVIDER": "huggingface"})
         assert config_dict["reranker"]["provider"] == "huggingface"
+
+    # --- ZeroEntropy reranker (hosted: api_key, not device) ---
+
+    def test_reranker_zero_entropy_api_key_from_dedicated_var(self):
+        """zero_entropy reranker takes MEM0_RERANK_API_KEY (not a device)."""
+        config_dict, *_ = self._build_with_env({
+            "MEM0_RERANK_PROVIDER": "zero_entropy",
+            "MEM0_RERANK_API_KEY": "ze-rerank-key",
+            "MEM0_RERANK_MODEL": "zerank-1",
+        })
+        cfg = config_dict["reranker"]["config"]
+        assert config_dict["reranker"]["provider"] == "zero_entropy"
+        assert cfg["api_key"] == "ze-rerank-key"
+        assert cfg["model"] == "zerank-1"
+        assert "device" not in cfg
+
+    def test_reranker_zero_entropy_api_key_falls_back_to_shared_var(self):
+        """zero_entropy reranker falls back to ZERO_ENTROPY_API_KEY."""
+        config_dict, *_ = self._build_with_env({
+            "MEM0_RERANK_PROVIDER": "zero_entropy",
+            "ZERO_ENTROPY_API_KEY": "shared-ze-key",
+        })
+        assert config_dict["reranker"]["config"]["api_key"] == "shared-ze-key"
+
+    def test_reranker_zero_entropy_ignores_device(self):
+        """device is a local-reranker concept; never forwarded for zero_entropy."""
+        config_dict, *_ = self._build_with_env({
+            "MEM0_RERANK_PROVIDER": "zero_entropy",
+            "ZERO_ENTROPY_API_KEY": "k",
+            "MEM0_RERANK_DEVICE": "mps",
+        })
+        assert "device" not in config_dict["reranker"]["config"]
+
+    def test_reranker_cohere_uses_cohere_key_not_zero_entropy(self):
+        """cohere reranker reads COHERE_API_KEY, not the ZeroEntropy fallback."""
+        config_dict, *_ = self._build_with_env({
+            "MEM0_RERANK_PROVIDER": "cohere",
+            "COHERE_API_KEY": "cohere-key",
+            "ZERO_ENTROPY_API_KEY": "should-not-be-used",
+        })
+        assert config_dict["reranker"]["config"]["api_key"] == "cohere-key"
+
+    # --- ZeroEntropy embedder (configured independently of the reranker) ---
+
+    def test_embedder_zeroentropy_defaults(self):
+        """zeroentropy embedder: model zembed-1, dims 2560, dims forwarded to embedder."""
+        config_dict, *_ = self._build_with_env({
+            "MEM0_EMBED_PROVIDER": "zeroentropy",
+            "ZERO_ENTROPY_API_KEY": "ze-embed-key",
+        })
+        emb = config_dict["embedder"]
+        assert emb["provider"] == "zeroentropy"
+        assert emb["config"]["model"] == "zembed-1"
+        assert emb["config"]["embedding_dims"] == 2560
+        assert emb["config"]["api_key"] == "ze-embed-key"
+        # Qdrant collection must be sized to the embedder width
+        assert config_dict["vector_store"]["config"]["embedding_model_dims"] == 2560
+
+    def test_embedder_zeroentropy_matryoshka_dims(self):
+        """MEM0_EMBED_DIMS narrows zembed-1 and the collection in lockstep."""
+        config_dict, *_ = self._build_with_env({
+            "MEM0_EMBED_PROVIDER": "zeroentropy",
+            "ZERO_ENTROPY_API_KEY": "k",
+            "MEM0_EMBED_DIMS": "1280",
+        })
+        assert config_dict["embedder"]["config"]["embedding_dims"] == 1280
+        assert config_dict["vector_store"]["config"]["embedding_model_dims"] == 1280
+
+    def test_embedder_zeroentropy_dedicated_key_overrides_shared(self):
+        """MEM0_EMBED_API_KEY takes precedence over ZERO_ENTROPY_API_KEY for embed."""
+        config_dict, *_ = self._build_with_env({
+            "MEM0_EMBED_PROVIDER": "zeroentropy",
+            "MEM0_EMBED_API_KEY": "dedicated-embed-key",
+            "ZERO_ENTROPY_API_KEY": "shared-key",
+        })
+        assert config_dict["embedder"]["config"]["api_key"] == "dedicated-embed-key"
+
+    def test_embedder_and_reranker_configured_separately(self):
+        """Embedder and reranker can pick different providers in the same config."""
+        config_dict, *_ = self._build_with_env({
+            "MEM0_EMBED_PROVIDER": "zeroentropy",
+            "ZERO_ENTROPY_API_KEY": "k",
+            "MEM0_RERANK_PROVIDER": "sentence_transformer",
+        })
+        assert config_dict["embedder"]["provider"] == "zeroentropy"
+        assert config_dict["reranker"]["provider"] == "sentence_transformer"
+
+    def test_embedder_openai_dims_default(self):
+        """openai embedder default dims are 1536 (provider-aware default)."""
+        config_dict, *_ = self._build_with_env({
+            "MEM0_EMBED_PROVIDER": "openai",
+            "OPENAI_API_KEY": "sk-x",
+        })
+        assert config_dict["embedder"]["config"]["model"] == "text-embedding-3-small"
+        assert config_dict["vector_store"]["config"]["embedding_model_dims"] == 1536

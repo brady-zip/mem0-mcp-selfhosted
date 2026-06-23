@@ -106,10 +106,11 @@ def _get_memory():
     os.environ["MEM0_RERANK_PROVIDER"] = ""
 
     from mem0_mcp_selfhosted.config import build_config
-    from mem0_mcp_selfhosted.server import register_providers
+    from mem0_mcp_selfhosted.server import register_embedders, register_providers
 
     config_dict, providers_info, _ = build_config()
     register_providers(providers_info)
+    register_embedders()
     # patch_graph_sanitizer() skipped — graph is force-disabled in hooks,
     # so the relationship sanitizer modules are never invoked.
 

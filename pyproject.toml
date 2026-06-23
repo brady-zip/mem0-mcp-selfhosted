@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mem0-mcp-selfhosted"
-version = "0.8.1"
+version = "0.9.0"
 description = "Self-hosted mem0 MCP server for Claude Code"
 license = "MIT"
 requires-python = ">=3.10"
@@ -43,6 +43,12 @@ dev = [
 # MEM0_RERANK_PROVIDER=sentence_transformer.
 rerank = [
     "sentence-transformers>=5.0",
+]
+# ZeroEntropy hosted API — used by the custom zembed-1 embedder
+# (MEM0_EMBED_PROVIDER=zeroentropy) and/or mem0ai's built-in zerank reranker
+# (MEM0_RERANK_PROVIDER=zero_entropy). Lightweight HTTP client, no torch.
+zeroentropy = [
+    "zeroentropy>=0.1.0",
 ]
 
 

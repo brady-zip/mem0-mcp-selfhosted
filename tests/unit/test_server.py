@@ -406,6 +406,33 @@ class TestRegisterProviders:
         mock_reg.assert_not_called()
 
 
+class TestRegisterEmbedders:
+    def test_registers_zeroentropy_class_path(self):
+        """register_embedders() maps 'zeroentropy' to the custom embedder path."""
+        from mem0.utils.factory import EmbedderFactory
+
+        server_mod.register_embedders()
+        assert (
+            EmbedderFactory.provider_to_class["zeroentropy"]
+            == "mem0_mcp_selfhosted.embed_zeroentropy.ZeroEntropyEmbedding"
+        )
+
+    def test_idempotent(self):
+        """Calling twice does not raise or duplicate (setdefault)."""
+        from mem0.utils.factory import EmbedderFactory
+
+        server_mod.register_embedders()
+        server_mod.register_embedders()
+        assert EmbedderFactory.provider_to_class["zeroentropy"].endswith("ZeroEntropyEmbedding")
+
+    def test_does_not_clobber_native_providers(self):
+        """Native providers (e.g. openai) are untouched by registration."""
+        from mem0.utils.factory import EmbedderFactory
+
+        server_mod.register_embedders()
+        assert EmbedderFactory.provider_to_class["openai"] == "mem0.embeddings.openai.OpenAIEmbedding"
+
+
 class TestCreateServer:
     def test_registers_11_tools(self):
         srv = server_mod._create_server()
