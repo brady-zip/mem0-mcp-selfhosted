@@ -46,6 +46,7 @@ rerank = [
 ]
 
 
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/mem0_mcp_selfhosted"]
 

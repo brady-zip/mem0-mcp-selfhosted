@@ -1,6 +1,44 @@
 # CHANGELOG
 
 
+## v0.8.0 (2026-06-23)
+
+### Chores
+
+- **deps**: Bump mem0ai lock 2.0.4 -> 2.0.7 (match deployed server)
+  ([#3](https://github.com/brady-zip/mem0-mcp-selfhosted/pull/3),
+  [`14e3836`](https://github.com/brady-zip/mem0-mcp-selfhosted/commit/14e38362c0cfe507a4ae2e3b4f23c997b5add105))
+
+The dev env locked mem0ai at the 2.0.4 floor while the installed MCP server runs 2.0.7. Regenerate
+  uv.lock so `uv sync` produces an environment matching what's deployed. Stays within the existing
+  >=2.0.4,<3 pin; no transitive changes, no test-result change (same 364 pass / 12 pre-existing fail
+  on both versions).
+
+### Features
+
+- **reranker**: In-process local reranking via mem0ai sentence_transformer
+  ([#5](https://github.com/brady-zip/mem0-mcp-selfhosted/pull/5),
+  [`6e8565f`](https://github.com/brady-zip/mem0-mcp-selfhosted/commit/6e8565f36afae1af0e0c5e11b5ca8c9c6a94d7cb))
+
+### Testing
+
+- Align test_server assertions with mem0 2.x signature + app_id default
+  ([#4](https://github.com/brady-zip/mem0-mcp-selfhosted/pull/4),
+  [`1ce87a5`](https://github.com/brady-zip/mem0-mcp-selfhosted/commit/1ce87a5e2aba6db332074b794dc0425fb1b68035))
+
+Three stale unit tests asserted pre-fork call shapes that server.py no longer uses (and correctly
+  so). They failed on both mem0ai 2.0.4 and 2.0.7 — they are test drift, not a code or version bug:
+
+- TestGetMemories.test_scope_filters / TestSearchMemories.test_all_kwargs asserted top-level
+  user_id/agent_id/run_id + limit=. server.py folds entity scopes into filters={...} and uses top_k=
+  (the mem0ai 2.x API, documented with NOTE(fork) comments in server.py). -
+  TestAddMemory.test_kwargs_assembly asserted metadata=={"source":"chat"}, but add_memory injects
+  the default app_id="general" (v0.6.1).
+
+Test-only change. test_server.py: 36/36 pass. Full non-integration suite drops from 12 to 9 failures
+  (remaining 9 are unrelated test-ordering pollution in test_config_matrix.py).
+
+
 ## v0.7.1 (2026-06-23)
 
 ### Bug Fixes
