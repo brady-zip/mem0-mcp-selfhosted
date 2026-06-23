@@ -83,7 +83,8 @@ class TestAddMemory:
         args, kwargs = mem.add.call_args
         assert args[0] == [{"role": "user", "content": "I prefer Python"}]
         assert kwargs["user_id"] == "alice"
-        assert kwargs["metadata"] == {"source": "chat"}
+        # add_memory injects the default app_id="general" into metadata (v0.6.1).
+        assert kwargs["metadata"] == {"source": "chat", "app_id": "general"}
         assert kwargs["infer"] is False
         parsed = json.loads(result)
         assert "results" in parsed
@@ -119,12 +120,16 @@ class TestSearchMemories:
             rerank=True,
         )
         _, kwargs = mem.search.call_args
+        # mem0ai 2.x: entity scopes (user_id/agent_id/run_id) fold into `filters`
+        # alongside any caller-supplied clauses, and `limit` maps to `top_k`.
         assert kwargs["query"] == "python preferences"
-        assert kwargs["user_id"] == "bob"
-        assert kwargs["agent_id"] == "agent-1"
-        assert kwargs["run_id"] == "run-1"
-        assert kwargs["filters"] == {"key": {"eq": "val"}}
-        assert kwargs["limit"] == 5
+        assert kwargs["filters"] == {
+            "key": {"eq": "val"},
+            "user_id": "bob",
+            "agent_id": "agent-1",
+            "run_id": "run-1",
+        }
+        assert kwargs["top_k"] == 5
         assert kwargs["threshold"] == 0.8
         assert kwargs["rerank"] is True
 
@@ -134,8 +139,10 @@ class TestGetMemories:
         srv, mem = server_with_mock
         fn = _get_tool_fn(srv, "get_memories")
         fn(user_id="alice", agent_id="agent-1", run_id="run-1", limit=10)
+        # mem0ai 2.x: entity scopes fold into `filters`, and `limit` maps to `top_k`.
         mem.get_all.assert_called_once_with(
-            user_id="alice", agent_id="agent-1", run_id="run-1", limit=10
+            filters={"user_id": "alice", "agent_id": "agent-1", "run_id": "run-1"},
+            top_k=10,
         )
 
 
