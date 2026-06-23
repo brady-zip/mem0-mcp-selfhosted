@@ -175,6 +175,22 @@ class TestNoGraphFastPath:
             f"Expected all False, got: {observed}"
         )
 
+    def test_memory_without_graph_attribute_uses_fast_path(self):
+        """Regression: mem0ai 2.0.7's Memory has NO `.graph` attribute when no
+        graph store is configured. call_with_graph must degrade to the fast path
+        via getattr, not raise AttributeError on every tool call (the bug that
+        broke add_memory/search_memories/get_memories on the live server)."""
+
+        class NoGraphAttrMemory:
+            """Mimics mem0ai 2.0.7: no `graph`/`enable_graph` attribute at all."""
+
+        mem = NoGraphAttrMemory()
+        # Must not raise AttributeError; runs the wrapped func.
+        result = call_with_graph(mem, None, False, lambda: "ok")
+        assert result == "ok"
+        # Fast path records the (no-op) intent.
+        assert mem.enable_graph is False
+
     def test_graph_lock_timeout_raises(self, monkeypatch):
         """RuntimeError raised when graph lock cannot be acquired within timeout."""
         import mem0_mcp_selfhosted.helpers as helpers_mod

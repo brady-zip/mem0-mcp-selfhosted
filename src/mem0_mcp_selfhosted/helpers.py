@@ -202,10 +202,13 @@ def call_with_graph(
     Each tool call resolves its own effective enable_graph value and passes
     it here.
 
-    Fast path (memory.graph is None): skips the lock entirely. When no graph
-    store is configured, all callers write enable_graph=False unconditionally —
-    concurrent writes are idempotent and safe. This enables fully concurrent
-    execution for the common self-hosted (no Neo4j) setup.
+    Fast path (no graph store): skips the lock entirely. When ``memory.graph``
+    is None — OR absent entirely (mem0ai 2.0.7 dropped the ``graph`` /
+    ``enable_graph`` attributes from ``Memory``) — all callers write
+    enable_graph=False unconditionally; concurrent writes are idempotent and
+    safe. This enables fully concurrent execution for the common self-hosted
+    (no Neo4j) setup. We read via getattr so a missing attribute degrades to the
+    fast path instead of raising AttributeError on every tool call.
 
     Slow path (memory.graph is not None): acquires _graph_lock with a
     configurable timeout (MEM0_LOCK_TIMEOUT_SECS, default 60s). Raises
@@ -217,7 +220,11 @@ def call_with_graph(
         raise RuntimeError("Memory not initialized. Infrastructure may be unavailable.")
     effective = enable_graph if enable_graph is not None else default_graph
 
-    if memory.graph is None:
+    # getattr, not direct access: mem0ai 2.0.7's Memory has no `graph` attribute
+    # when no graph store is configured, so `memory.graph` would AttributeError.
+    graph = getattr(memory, "graph", None)
+
+    if graph is None:
         # Fast path: no graph store — all callers write False, no race possible
         memory.enable_graph = False
         return func(*args, **kwargs)
@@ -232,7 +239,7 @@ def call_with_graph(
             "Increase MEM0_LOCK_TIMEOUT_SECS or disable graph store."
         )
     try:
-        memory.enable_graph = effective and memory.graph is not None
+        memory.enable_graph = effective and graph is not None
         return func(*args, **kwargs)
     finally:
         _graph_lock.release()
