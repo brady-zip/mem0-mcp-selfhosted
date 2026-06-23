@@ -10,6 +10,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from unittest.mock import MagicMock
 
+import pytest
+
 from mem0_mcp_selfhosted.helpers import call_with_graph
 
 
@@ -112,3 +114,99 @@ class TestEnableGraphWithNoGraphStore:
         assert captured[0] is False, (
             "enable_graph should be False when memory.graph is None"
         )
+
+
+class TestNoGraphFastPath:
+    """Verify the lock-free fast path when memory.graph is None."""
+
+    def test_no_graph_skips_lock_allows_concurrent_execution(self):
+        """With no graph store, concurrent calls run in parallel (not serialized)."""
+        import time
+
+        class NoGraphMemory:
+            def __init__(self):
+                self.graph = None
+                self.enable_graph = False
+
+        mem = NoGraphMemory()
+        results = []
+
+        def slow_fn():
+            time.sleep(0.05)
+            return True
+
+        start = time.monotonic()
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = [pool.submit(call_with_graph, mem, None, False, slow_fn) for _ in range(5)]
+            for f in as_completed(futures):
+                results.append(f.result())
+        elapsed = time.monotonic() - start
+
+        assert all(results)
+        # Concurrent: should finish well under 5 * 0.05 = 0.25s
+        assert elapsed < 0.15, (
+            f"Fast path appears to be serialized: took {elapsed:.3f}s, expected < 0.15s"
+        )
+
+    def test_no_graph_concurrent_all_observe_false(self):
+        """All threads observe enable_graph=False in the fast path."""
+
+        class NoGraphMemory:
+            def __init__(self):
+                self.graph = None
+                self.enable_graph = False
+
+        mem = NoGraphMemory()
+        observed = []
+        lock = threading.Lock()
+
+        def capture():
+            with lock:
+                observed.append(mem.enable_graph)
+            return True
+
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            futures = [pool.submit(call_with_graph, mem, None, False, capture) for _ in range(20)]
+            for f in as_completed(futures):
+                f.result()
+
+        assert len(observed) == 20
+        assert all(v is False for v in observed), (
+            f"Expected all False, got: {observed}"
+        )
+
+    def test_graph_lock_timeout_raises(self, monkeypatch):
+        """RuntimeError raised when graph lock cannot be acquired within timeout."""
+        import mem0_mcp_selfhosted.helpers as helpers_mod
+
+        monkeypatch.setenv("MEM0_LOCK_TIMEOUT_SECS", "0.05")
+        # Reset cached timeout so env var is re-read
+        helpers_mod._GRAPH_LOCK_TIMEOUT_SECS = None
+
+        class GraphMemory:
+            def __init__(self):
+                self.graph = MagicMock()  # non-None → slow path
+                self.enable_graph = False
+
+        mem = GraphMemory()
+        barrier = threading.Event()
+        release_event = threading.Event()
+
+        def hold_lock():
+            """Acquire the lock and hold it until signalled."""
+            helpers_mod._graph_lock.acquire()
+            barrier.set()
+            release_event.wait(timeout=2.0)
+            helpers_mod._graph_lock.release()
+
+        holder = threading.Thread(target=hold_lock, daemon=True)
+        holder.start()
+        barrier.wait()  # ensure lock is held before we proceed
+
+        try:
+            with pytest.raises(RuntimeError, match="Graph lock timeout"):
+                call_with_graph(mem, True, True, lambda: True)
+        finally:
+            release_event.set()  # signal holder to release the lock
+            holder.join(timeout=1.0)
+            helpers_mod._GRAPH_LOCK_TIMEOUT_SECS = None
