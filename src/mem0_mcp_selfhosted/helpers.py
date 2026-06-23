@@ -132,9 +132,20 @@ def patch_gemini_parse_response() -> None:
     logger.info("Patched GeminiLLM._parse_response for null content guard")
 
 
-# Serializes enable_graph mutation + full Memory method execution.
+# Serializes enable_graph mutation + full Memory method execution when graph is active.
 # Lock hold time is 2-20 seconds (see PRD §2.4).
 _graph_lock = threading.Lock()
+
+# Lazily resolved from MEM0_LOCK_TIMEOUT_SECS on first call to _get_graph_lock_timeout().
+_GRAPH_LOCK_TIMEOUT_SECS: float | None = None
+
+
+def _get_graph_lock_timeout() -> float:
+    """Return the graph lock acquisition timeout in seconds (env-driven, cached)."""
+    global _GRAPH_LOCK_TIMEOUT_SECS
+    if _GRAPH_LOCK_TIMEOUT_SECS is None:
+        _GRAPH_LOCK_TIMEOUT_SECS = float(env("MEM0_LOCK_TIMEOUT_SECS", "60"))
+    return _GRAPH_LOCK_TIMEOUT_SECS
 
 
 def get_default_user_id() -> str:
@@ -189,17 +200,42 @@ def call_with_graph(
     """Execute a Memory method with per-request enable_graph context.
 
     Each tool call resolves its own effective enable_graph value and passes
-    it here. The lock ensures no concurrent request can observe a stale flag.
+    it here.
 
-    IMPORTANT: The lock is held for the full duration of func() (2-20s),
-    because Memory.add() blocks on concurrent.futures.wait() internally.
+    Fast path (memory.graph is None): skips the lock entirely. When no graph
+    store is configured, all callers write enable_graph=False unconditionally —
+    concurrent writes are idempotent and safe. This enables fully concurrent
+    execution for the common self-hosted (no Neo4j) setup.
+
+    Slow path (memory.graph is not None): acquires _graph_lock with a
+    configurable timeout (MEM0_LOCK_TIMEOUT_SECS, default 60s). Raises
+    RuntimeError on timeout rather than hanging indefinitely. The lock is held
+    for the full duration of func() (2-20s), because Memory.add() blocks on
+    concurrent.futures.wait() internally.
     """
     if memory is None:
         raise RuntimeError("Memory not initialized. Infrastructure may be unavailable.")
     effective = enable_graph if enable_graph is not None else default_graph
-    with _graph_lock:
+
+    if memory.graph is None:
+        # Fast path: no graph store — all callers write False, no race possible
+        memory.enable_graph = False
+        return func(*args, **kwargs)
+
+    # Slow path: graph active — serialize to prevent stale flag observation
+    timeout = _get_graph_lock_timeout()
+    acquired = _graph_lock.acquire(timeout=timeout)
+    if not acquired:
+        raise RuntimeError(
+            f"Graph lock timeout after {timeout}s. "
+            "Too many concurrent requests or a stuck operation. "
+            "Increase MEM0_LOCK_TIMEOUT_SECS or disable graph store."
+        )
+    try:
         memory.enable_graph = effective and memory.graph is not None
         return func(*args, **kwargs)
+    finally:
+        _graph_lock.release()
 
 
 def safe_bulk_delete(memory: Any, filters: dict[str, Any], *, graph_enabled: bool = False) -> int:
