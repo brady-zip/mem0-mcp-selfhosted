@@ -1,6 +1,35 @@
 # CHANGELOG
 
 
+## v0.8.1 (2026-06-23)
+
+### Bug Fixes
+
+- **graph**: Tolerate Memory without a graph attribute (mem0ai 2.0.7)
+  ([#7](https://github.com/brady-zip/mem0-mcp-selfhosted/pull/7),
+  [`d9a85f0`](https://github.com/brady-zip/mem0-mcp-selfhosted/commit/d9a85f0e522fb83397223ef20d77450b3d119ce3))
+
+mem0ai 2.0.7 dropped Memory.graph / Memory.enable_graph and the MemoryConfig.enable_graph field.
+  call_with_graph() read `memory.graph` unconditionally, so every add_memory / search_memories /
+  get_memories call raised `AttributeError: 'Memory' object has no attribute 'graph'` — the three
+  MCP memory tools were broken on the live server after the 2.0.7 upgrade. (Passive recall/capture
+  hooks were unaffected: they call Memory.search() directly, bypassing call_with_graph — which is
+  why it went unnoticed, and why the existing mocked fast-path tests, which set memory.graph=None,
+  still passed.)
+
+Fix: read graph via getattr(memory, "graph", None). When the attribute is
+
+absent (or None) we degrade to the existing lock-free fast path — correct for the graph-disabled
+  deployment. safe_bulk_delete() already guarded with hasattr.
+
+Tests: - regression unit test: call_with_graph on a Memory with NO graph attribute must not raise
+  and runs the wrapped func (the live failure mode). - contract tests pinning the mem0ai 2.0.7 drift
+  (Memory.__init__ sets no self.graph; MemoryConfig has no enable_graph field) so a future
+  re-introduction flags for re-review.
+
+375 -> 378 passing (+3), zero regressions.
+
+
 ## v0.8.0 (2026-06-23)
 
 ### Chores
