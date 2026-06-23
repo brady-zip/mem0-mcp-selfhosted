@@ -121,6 +121,43 @@ class TestLlmFactoryRegistration:
             )
 
 
+class TestMemoryGraphAttribute:
+    """mem0ai 2.0.7 dropped Memory.graph / Memory.enable_graph.
+
+    helpers.call_with_graph() must read graph via getattr (not direct access),
+    because mem0ai 2.0.7's Memory does not set `self.graph` when no graph store
+    is configured — direct access raised AttributeError on every memory tool
+    call. If a future mem0ai restores these attributes, this test flags it so we
+    can re-review whether the per-call graph toggle is wired correctly again.
+    """
+
+    def test_memory_init_does_not_set_graph_attribute(self):
+        try:
+            from mem0.memory.main import Memory
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        import inspect
+
+        src = inspect.getsource(Memory.__init__)
+        assert "self.graph" not in src, (
+            "mem0ai re-introduced Memory.graph in __init__. Re-review "
+            "helpers.call_with_graph(): the per-call graph toggle may now be "
+            "live again and the getattr fallback masks slow-path behavior."
+        )
+
+    def test_memory_config_has_no_enable_graph_field(self):
+        try:
+            from mem0.configs.base import MemoryConfig
+        except ImportError:
+            pytest.skip("mem0ai not installed")
+
+        assert "enable_graph" not in MemoryConfig.model_fields, (
+            "mem0ai re-introduced MemoryConfig.enable_graph. The fork's graph "
+            "toggle assumptions need re-validation."
+        )
+
+
 class TestOllamaLLMInterface:
     """Validate upstream OllamaLLM interface our subclass depends on."""
 
