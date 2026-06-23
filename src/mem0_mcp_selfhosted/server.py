@@ -69,6 +69,23 @@ def register_providers(providers_info: list[ProviderInfo]) -> None:
         )
 
 
+def register_embedders() -> None:
+    """Register custom embedder providers with mem0ai's EmbedderFactory.
+
+    Unlike LlmFactory, mem0ai's EmbedderFactory has no register_provider()
+    method, so we extend its ``provider_to_class`` map directly. The class is
+    lazy-imported by ``EmbedderFactory.create()`` via ``load_class()`` only when
+    the provider is actually selected — so the ``zeroentropy`` package is not
+    required unless ``MEM0_EMBED_PROVIDER=zeroentropy``. ``setdefault`` makes this
+    idempotent and never clobbers a native/existing mapping.
+    """
+    from mem0.utils.factory import EmbedderFactory
+
+    EmbedderFactory.provider_to_class.setdefault(
+        "zeroentropy", "mem0_mcp_selfhosted.embed_zeroentropy.ZeroEntropyEmbedding"
+    )
+
+
 def _resolve_config_class(provider_name: str) -> type | None:
     """Lazy-resolve the config class for a provider name.
 
@@ -93,6 +110,7 @@ def _init_memory() -> Any:
     config_dict, providers_info, split_config = build_config()
 
     register_providers(providers_info)
+    register_embedders()
 
     # Patch mem0ai's relationship sanitizer before Memory init
     patch_graph_sanitizer()

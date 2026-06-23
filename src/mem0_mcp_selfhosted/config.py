@@ -84,10 +84,22 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
             llm_config["api_key"] = openai_key
 
     # --- Embedder ---
+    # Provider-aware defaults: model + dimensionality differ per provider, and the
+    # Qdrant collection MUST be sized to the embedder's output width (embed_dims).
     embed_provider = env("MEM0_EMBED_PROVIDER", "ollama")
-    embed_model = env("MEM0_EMBED_MODEL", "bge-m3")
+    _embed_model_defaults = {
+        "ollama": "bge-m3",
+        "openai": "text-embedding-3-small",
+        "zeroentropy": "zembed-1",
+    }
+    _embed_dims_defaults = {
+        "ollama": 1024,
+        "openai": 1536,
+        "zeroentropy": 2560,  # zembed-1 default (matryoshka: 2560/1280/640/...)
+    }
+    embed_model = env("MEM0_EMBED_MODEL", _embed_model_defaults.get(embed_provider, "bge-m3"))
     embed_url = _resolve_ollama_url("MEM0_EMBED_URL")
-    embed_dims = int(env("MEM0_EMBED_DIMS", "1024"))
+    embed_dims = int(env("MEM0_EMBED_DIMS", str(_embed_dims_defaults.get(embed_provider, 1024))))
 
     embedder_config: dict[str, Any] = {
         "model": embed_model,
@@ -99,6 +111,14 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
         openai_key = opt_env("OPENAI_API_KEY")
         if openai_key:
             embedder_config["api_key"] = openai_key
+    elif embed_provider == "zeroentropy":
+        # Custom in-process provider registered via server.register_embedders().
+        # zembed-1 is matryoshka: forward embedding_dims so the embedder requests
+        # the exact width the Qdrant collection is sized for (they MUST match).
+        embedder_config["embedding_dims"] = embed_dims
+        ze_key = opt_env("MEM0_EMBED_API_KEY") or opt_env("ZERO_ENTROPY_API_KEY")
+        if ze_key:
+            embedder_config["api_key"] = ze_key
 
     # --- Vector Store ---
     collection = env("MEM0_COLLECTION", "mem0_mcp_selfhosted")
@@ -169,14 +189,19 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
     if history_db_path:
         config_dict["history_db_path"] = history_db_path
 
-    # --- Reranker (optional, in-process local CrossEncoder) ---
+    # --- Reranker (optional) ---
     # Provider-agnostic: any reranker pre-registered in mem0ai's RerankerFactory
-    # works (e.g. "sentence_transformer", "huggingface") — no custom module or
-    # registration needed. The model is loaded in-process at Memory init, so this
-    # is intentionally force-disabled in hooks.py: only the long-running server
-    # reranks (load once), while short-lived passive-recall hook processes never
-    # pay the cold model-load cost. Requires the sentence-transformers stack
-    # (install via the "rerank" extra).
+    # works — no custom module or registration needed. Two families:
+    #   * local CrossEncoder ("sentence_transformer", "huggingface") — loads a
+    #     model in-process at Memory init; takes a device (cpu/mps/cuda).
+    #   * hosted HTTP API ("zero_entropy", "cohere") — no local model; takes an
+    #     api_key (and an optional model id).
+    # Reranking is intentionally force-disabled in hooks.py (passive-recall hook
+    # processes are short-lived and never ask to be reranked): for local models
+    # it avoids a per-process cold model-load; for hosted APIs it avoids a
+    # per-recall network round-trip and its cost. Only the long-running server
+    # reranks. Local rerankers need the sentence-transformers stack (the "rerank"
+    # extra); ZeroEntropy needs the "zeroentropy" extra.
     rerank_provider = opt_env("MEM0_RERANK_PROVIDER")
     if rerank_provider:
         rerank_cfg: dict[str, Any] = {}
@@ -186,10 +211,21 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
         rerank_top_k = opt_env("MEM0_RERANK_TOP_K")
         if rerank_top_k:
             rerank_cfg["top_k"] = int(rerank_top_k)
-        # "cpu" | "mps" | "cuda"; omit for the library's auto-detection.
-        rerank_device = opt_env("MEM0_RERANK_DEVICE")
-        if rerank_device:
-            rerank_cfg["device"] = rerank_device
+        # Hosted rerankers take an api_key; local ones take a device. Keep them
+        # separate so a field is never sent to a provider whose schema rejects it.
+        if rerank_provider == "zero_entropy":
+            ze_key = opt_env("MEM0_RERANK_API_KEY") or opt_env("ZERO_ENTROPY_API_KEY")
+            if ze_key:
+                rerank_cfg["api_key"] = ze_key
+        elif rerank_provider == "cohere":
+            cohere_key = opt_env("MEM0_RERANK_API_KEY") or opt_env("COHERE_API_KEY")
+            if cohere_key:
+                rerank_cfg["api_key"] = cohere_key
+        else:
+            # "cpu" | "mps" | "cuda"; omit for the library's auto-detection.
+            rerank_device = opt_env("MEM0_RERANK_DEVICE")
+            if rerank_device:
+                rerank_cfg["device"] = rerank_device
         config_dict["reranker"] = {"provider": rerank_provider, "config": rerank_cfg}
 
     # --- Graph Store (conditional) ---
