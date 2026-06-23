@@ -25,7 +25,7 @@ Self-hosted MCP server using `mem0ai` as a library. 11 tools (9 memory + 2 graph
 
 **Module roles:**
 - `server.py` — FastMCP orchestrator, registers all tools + `memory_assistant` prompt
-- `config.py` — Env vars → mem0ai `MemoryConfig` dict, handles all 5 graph LLM provider configs
+- `config.py` — Env vars → mem0ai `MemoryConfig` dict, handles all 5 graph LLM provider configs + the optional reranker block (`MEM0_RERANK_*`)
 - `auth.py` — 3-tier token fallback: `MEM0_ANTHROPIC_TOKEN` → `~/.claude/.credentials.json` → `ANTHROPIC_API_KEY`
 - `llm_anthropic.py` — Custom Anthropic provider registered with mem0ai's `LlmFactory`; handles OAT headers, structured outputs (JSON schema via `output_config`), and tool-call parsing
 - `llm_router.py` — `SplitModelGraphLLM` routes by tool name: extraction tools → Gemini, contradiction tools → Claude
@@ -39,4 +39,5 @@ Self-hosted MCP server using `mem0ai` as a library. 11 tools (9 memory + 2 graph
 - Contract tests (`tests/contract/`) validate mem0ai internal API assumptions — if these fail after a mem0ai upgrade, the code needs updating
 - `Memory.update()` uses `data=` parameter, not `text=`
 - Structured output support requires claude-opus-4/sonnet-4/haiku-4 models; older models fall back to JSON extraction
+- Reranking is optional and in-process: set `MEM0_RERANK_PROVIDER` (e.g. `sentence_transformer`) to load a local CrossEncoder via mem0ai's pre-registered `RerankerFactory` providers — no custom module/registration. Needs the `[rerank]` extra (`sentence-transformers`, pulls torch). `Memory.__init__` builds the reranker **eagerly**, so `hooks.py` force-disables it (`MEM0_RERANK_PROVIDER=""`): only the long-running server reranks (model loads once), while short-lived passive-recall hook processes never pay the cold-load. Interactive `search_memories` reranks by default when a reranker is configured (`mem.reranker is not None`); per-call `rerank=False` overrides
 - mem0ai's `sanitize_relationship_for_cypher()` has gaps (no hyphen handling, no leading-digit check) — `patch_graph_sanitizer()` wraps it at startup to ensure all relationship types match `^[a-zA-Z_][a-zA-Z0-9_]*$`

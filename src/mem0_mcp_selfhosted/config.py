@@ -169,6 +169,29 @@ def build_config() -> tuple[dict[str, Any], list[ProviderInfo], dict[str, Any] |
     if history_db_path:
         config_dict["history_db_path"] = history_db_path
 
+    # --- Reranker (optional, in-process local CrossEncoder) ---
+    # Provider-agnostic: any reranker pre-registered in mem0ai's RerankerFactory
+    # works (e.g. "sentence_transformer", "huggingface") — no custom module or
+    # registration needed. The model is loaded in-process at Memory init, so this
+    # is intentionally force-disabled in hooks.py: only the long-running server
+    # reranks (load once), while short-lived passive-recall hook processes never
+    # pay the cold model-load cost. Requires the sentence-transformers stack
+    # (install via the "rerank" extra).
+    rerank_provider = opt_env("MEM0_RERANK_PROVIDER")
+    if rerank_provider:
+        rerank_cfg: dict[str, Any] = {}
+        rerank_model = opt_env("MEM0_RERANK_MODEL")
+        if rerank_model:
+            rerank_cfg["model"] = rerank_model
+        rerank_top_k = opt_env("MEM0_RERANK_TOP_K")
+        if rerank_top_k:
+            rerank_cfg["top_k"] = int(rerank_top_k)
+        # "cpu" | "mps" | "cuda"; omit for the library's auto-detection.
+        rerank_device = opt_env("MEM0_RERANK_DEVICE")
+        if rerank_device:
+            rerank_cfg["device"] = rerank_device
+        config_dict["reranker"] = {"provider": rerank_provider, "config": rerank_cfg}
+
     # --- Graph Store (conditional) ---
     enable_graph = bool_env("MEM0_ENABLE_GRAPH")
     graph_llm_provider_raw: str | None = (
