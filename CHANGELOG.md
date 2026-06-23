@@ -1,6 +1,42 @@
 # CHANGELOG
 
 
+## v0.9.0 (2026-06-23)
+
+### Features
+
+- **zeroentropy**: Selectable as embedder and/or reranker, configured separately
+  ([#6](https://github.com/brady-zip/mem0-mcp-selfhosted/pull/6),
+  [`2326ba3`](https://github.com/brady-zip/mem0-mcp-selfhosted/commit/2326ba30054a6817c4dc6522cdb61906e4b89f17))
+
+Make ZeroEntropy a first-class provider on BOTH sides of retrieval, each independently selectable
+  (either, neither, or both):
+
+* Embedder (NEW): custom in-process `zembed-1` embedder (embed_zeroentropy.py). mem0ai ships a
+  `zero_entropy` reranker but no ZeroEntropy embedder, so this fills the gap. Registered by mutating
+  EmbedderFactory.provider_to_class (that factory has no register_provider()); lazy-imported so the
+  `zeroentropy` package is only needed when MEM0_EMBED_PROVIDER=zeroentropy. Maps mem0 memory_action
+  -> ZeroEntropy input_type (add/update->document, search->query) for asymmetric retrieval. zembed-1
+  is matryoshka: MEM0_EMBED_DIMS (default 2560) is forwarded as `dimensions` AND sizes the Qdrant
+  collection.
+
+* Reranker: mem0ai's built-in `zero_entropy` reranker, now wired with an api_key. config.py keeps
+  device (local) vs api_key (hosted) on separate provider branches so a field is never sent to a
+  schema that rejects it.
+
+Config is provider-aware: embedder model/dims default per provider (ollama/openai/zeroentropy); api
+  keys resolve MEM0_EMBED_API_KEY / MEM0_RERANK_API_KEY -> ZERO_ENTROPY_API_KEY (cohere ->
+  COHERE_API_KEY). register_embedders() is also called from the hooks path.
+
+New `[zeroentropy]` extra (lightweight HTTP client, no torch). Docs in .env.example + CLAUDE.md.
+  Tests: mocked embedder unit tests, config matrix for both sides, register_embedders() unit tests,
+  and contract tests pinning the mem0ai EmbedderFactory/RerankerFactory + ZeroEntropy SDK
+  invariants.
+
+Continuation of the reranker thread from #1 (the broken Ollama HTTP reranker); #1's concurrency fix
+  shipped in #2 and local reranking in #5.
+
+
 ## v0.8.1 (2026-06-23)
 
 ### Bug Fixes
