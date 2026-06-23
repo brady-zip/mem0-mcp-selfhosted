@@ -733,3 +733,40 @@ class TestBuildConfig:
         assert config_dict["embedder"]["config"]["ollama_base_url"] == "http://192.168.0.208:11434"
         assert config_dict["graph_store"]["llm"]["provider"] == "ollama"
         assert config_dict["graph_store"]["llm"]["config"]["ollama_base_url"] == "http://192.168.0.208:11434"
+
+    # --- Reranker config (15.x) ---
+
+    def test_reranker_absent_by_default(self):
+        """No reranker block when MEM0_RERANK_PROVIDER is unset."""
+        config_dict, *_ = self._build_with_env({})
+        assert "reranker" not in config_dict
+
+    def test_reranker_empty_provider_disabled(self):
+        """Empty MEM0_RERANK_PROVIDER (how hooks force-disable) adds no reranker block."""
+        config_dict, *_ = self._build_with_env({"MEM0_RERANK_PROVIDER": ""})
+        assert "reranker" not in config_dict
+
+    def test_reranker_provider_only(self):
+        """Provider alone yields a reranker block with an empty (defaults) config."""
+        config_dict, *_ = self._build_with_env({"MEM0_RERANK_PROVIDER": "sentence_transformer"})
+        assert config_dict["reranker"]["provider"] == "sentence_transformer"
+        assert config_dict["reranker"]["config"] == {}
+
+    def test_reranker_model_top_k_device_propagate(self):
+        """model/top_k/device env vars propagate into the reranker config block."""
+        env = {
+            "MEM0_RERANK_PROVIDER": "sentence_transformer",
+            "MEM0_RERANK_MODEL": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            "MEM0_RERANK_TOP_K": "8",
+            "MEM0_RERANK_DEVICE": "mps",
+        }
+        config_dict, *_ = self._build_with_env(env)
+        cfg = config_dict["reranker"]["config"]
+        assert cfg["model"] == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        assert cfg["top_k"] == 8  # coerced from str to int
+        assert cfg["device"] == "mps"
+
+    def test_reranker_provider_agnostic(self):
+        """Any provider string is accepted (e.g. huggingface) — no enum guard."""
+        config_dict, *_ = self._build_with_env({"MEM0_RERANK_PROVIDER": "huggingface"})
+        assert config_dict["reranker"]["provider"] == "huggingface"

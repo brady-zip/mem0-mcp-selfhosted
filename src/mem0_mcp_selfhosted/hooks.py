@@ -97,6 +97,14 @@ def _get_memory():
     # that load_dotenv() loaded at module init.
     os.environ["MEM0_ENABLE_GRAPH"] = "false"
 
+    # Force the reranker off for the same reason, plus a sharper one: the
+    # reranker loads a CrossEncoder model in-process at Memory init (eager). Each
+    # hook invocation is a fresh, short-lived process, so a configured reranker
+    # would cold-load the model on every session start/stop — seconds of latency,
+    # risking the hook timeout — for recall that never asks to be reranked.
+    # Reranking belongs only in the long-running server.
+    os.environ["MEM0_RERANK_PROVIDER"] = ""
+
     from mem0_mcp_selfhosted.config import build_config
     from mem0_mcp_selfhosted.server import register_providers
 

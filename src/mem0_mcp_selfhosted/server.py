@@ -327,10 +327,17 @@ def _register_tools(mcp: FastMCP) -> None:
             kwargs["top_k"] = limit
         if threshold is not None:
             kwargs["threshold"] = threshold
-        if rerank is not None:
-            kwargs["rerank"] = rerank
 
         mem = _ensure_memory()
+
+        # Active search reranks by default whenever a reranker is configured;
+        # callers can still opt out per call with rerank=False. Passive-recall
+        # hooks force the reranker off (see hooks.py), so this default only ever
+        # applies to interactive search_memories calls — never session-start recall.
+        reranker_available = mem is not None and getattr(mem, "reranker", None) is not None
+        effective_rerank = rerank if rerank is not None else reranker_available
+        if effective_rerank:
+            kwargs["rerank"] = True
 
         def _do_search():
             return mem.search(**kwargs)

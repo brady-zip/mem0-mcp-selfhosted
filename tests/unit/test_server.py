@@ -38,6 +38,7 @@ def mock_memory():
     mem.get.return_value = {"id": "mem-1", "memory": "test fact"}
     mem.update.return_value = None
     mem.delete.return_value = None
+    mem.reranker = None  # default: no reranker configured
     return mem
 
 
@@ -132,6 +133,33 @@ class TestSearchMemories:
         assert kwargs["top_k"] == 5
         assert kwargs["threshold"] == 0.8
         assert kwargs["rerank"] is True
+
+    def test_rerank_defaults_on_when_reranker_configured(self, server_with_mock):
+        """With a reranker configured and no explicit rerank arg, search reranks."""
+        srv, mem = server_with_mock
+        mem.reranker = MagicMock()  # a reranker is configured
+        fn = _get_tool_fn(srv, "search_memories")
+        fn(query="anything")
+        _, kwargs = mem.search.call_args
+        assert kwargs["rerank"] is True
+
+    def test_rerank_skipped_when_no_reranker(self, server_with_mock):
+        """With no reranker configured, search does not pass rerank (mem default)."""
+        srv, mem = server_with_mock
+        # fixture sets mem.reranker = None
+        fn = _get_tool_fn(srv, "search_memories")
+        fn(query="anything")
+        _, kwargs = mem.search.call_args
+        assert "rerank" not in kwargs
+
+    def test_rerank_explicit_false_overrides_default(self, server_with_mock):
+        """rerank=False opts out even when a reranker is configured."""
+        srv, mem = server_with_mock
+        mem.reranker = MagicMock()  # a reranker is configured
+        fn = _get_tool_fn(srv, "search_memories")
+        fn(query="anything", rerank=False)
+        _, kwargs = mem.search.call_args
+        assert "rerank" not in kwargs
 
 
 class TestGetMemories:
