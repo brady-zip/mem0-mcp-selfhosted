@@ -1,6 +1,23 @@
 # CHANGELOG
 
 
+## v0.10.0 (2026-06-26)
+
+### Features
+
+- **hooks**: Fold previous handoff into next synthesis for continuity
+  ([`0fee261`](https://github.com/brady-zip/mem0-mcp-selfhosted/commit/0fee261960368b0972d21f1f6d0479f47da8bffc))
+
+Read the existing handoff (the one about to be overwritten) and fold its prose recap into the
+  synthesis prompt so each handoff is a continuation — carrying forward still-true goals/watch-outs
+  the last few transcript turns no longer mention — rather than a fresh take on a short window.
+
+- _read_previous_handoff(): reads the prior handoff at _handoff_path_for, strips the auto-written
+  header + git-status appendix, truncates to _HANDOFF_PREV_MAX; fail-open to "". -
+  _synthesize_handoff() takes cwd, adds a '## Previous handoff' section and a continuation
+  instruction; _write_handoff threads cwd through. - 5 unit tests in TestPreviousHandoff.
+
+
 ## v0.9.0 (2026-06-23)
 
 ### Features
