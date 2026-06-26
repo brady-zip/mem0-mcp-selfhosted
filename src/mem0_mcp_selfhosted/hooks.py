@@ -46,6 +46,7 @@ _RECENT_WINDOW = 6  # last ~3 exchanges (user+assistant pairs)
 
 _HANDOFF_DIR_ENV = "MEM0_HANDOFF_DIR"
 _HANDOFF_RECALL_MAX = 4  # mem0 memories folded into the synthesis prompt
+_HANDOFF_PREV_MAX = 2000  # chars of the previous handoff folded into synthesis
 
 
 def _get_user_id() -> str:
@@ -364,17 +365,58 @@ def _git_status_block(cwd: str) -> str:
     return "\n".join(out.stdout.strip().splitlines()[:15])
 
 
+def _read_previous_handoff(cwd: str, project_name: str) -> str:
+    """Return the prose recap of the existing handoff about to be overwritten.
+
+    Each meaningful turn overwrites the handoff at ``_handoff_path_for``; folding
+    the prior one back into synthesis makes the next recap a *continuation* (it
+    can carry forward goals/watch-outs the last few transcript turns no longer
+    mention) instead of a fresh take on a short window. Strips the auto-written
+    HTML comment + metadata header and the git-status appendix so only the recap
+    prose is fed back, truncated to ``_HANDOFF_PREV_MAX`` chars. Returns "" when
+    no prior handoff exists or it can't be read — never raises.
+    """
+    try:
+        path = _handoff_path_for(cwd, project_name)
+        if not path.is_file():
+            return ""
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        logger.debug("reading previous handoff failed", exc_info=True)
+        return ""
+
+    # Drop the git-status appendix (everything from its "### git status" rule).
+    marker = text.find("### git status")
+    if marker != -1:
+        text = text[:marker].rstrip().rstrip("-").rstrip()
+
+    # Start at the **Goal** recap, skipping the HTML comment + metadata header.
+    goal = text.find("**Goal**")
+    if goal != -1:
+        text = text[goal:]
+
+    return text.strip()[:_HANDOFF_PREV_MAX]
+
+
 def _synthesize_handoff(
-    mem, recent: list[tuple[str, str]], project_name: str
+    mem, recent: list[tuple[str, str]], project_name: str, cwd: str = ""
 ) -> str:
     """One LLM call turning the recent transcript + mem0 recall into a recap.
 
     Uses mem0's already-configured chat LLM (provider-agnostic via
-    ``mem.llm.generate_response``). Returns "" on any failure so the caller can
-    skip writing the file.
+    ``mem.llm.generate_response``). Reads the previous handoff (via *cwd*) so the
+    new recap builds on it rather than starting cold. Returns "" on any failure
+    so the caller can skip writing the file.
     """
     convo = "\n\n".join(
         f"[{'User' if r == 'user' else 'Assistant'}]: {c}" for r, c in recent
+    )
+
+    # Build on the prior handoff (the one this run will overwrite, read before
+    # _write_handoff overwrites it) so the recap is a continuation.
+    previous_block = (
+        _read_previous_handoff(cwd, project_name)
+        or "(none — first handoff for this project)"
     )
 
     # "augment with mem0": fold a scoped recall into the synthesis context so
@@ -402,9 +444,13 @@ def _synthesize_handoff(
         "You are writing a terse resume handoff so a future agent (or the same "
         "user returning to a cold context) can pick up a coding session "
         "immediately. Be concrete: name files, PR numbers, identifiers.\n\n"
+        f"## Previous handoff (the recap you are updating):\n{previous_block}\n\n"
         f"## Recent conversation (oldest first), project '{project_name}':\n"
         f"{convo}\n\n"
         f"## Relevant long-term memory:\n{recalled_block}\n\n"
+        "Treat the previous handoff as prior state: carry forward goals and "
+        "watch-outs that still hold, update State/Next from the recent "
+        "conversation, and drop anything now done. Do not copy it verbatim.\n\n"
         "Write markdown under ~180 words, omitting any section that does not "
         "apply, with these headers:\n"
         "- **Goal** — the overarching objective in one sentence.\n"
@@ -443,7 +489,7 @@ def _write_handoff(
     PreCompact response is never broken.
     """
     try:
-        body = _synthesize_handoff(mem, recent, project_name)
+        body = _synthesize_handoff(mem, recent, project_name, cwd)
         if not body:
             return None
 

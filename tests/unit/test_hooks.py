@@ -520,6 +520,88 @@ class TestStopMain:
 
 
 # ---------------------------------------------------------------------------
+# 6.45  previous-handoff continuity (_read_previous_handoff / _synthesize_handoff)
+# ---------------------------------------------------------------------------
+
+
+class TestPreviousHandoff:
+    CWD = "/home/user/myproject"
+    PROJECT = "myproject"
+
+    def _write_prior(self, tmp_path, monkeypatch, body):
+        """Point the handoff dir at tmp_path and write a prior handoff file."""
+        monkeypatch.setenv("MEM0_HANDOFF_DIR", str(tmp_path))
+        path = hooks._handoff_path_for(self.CWD, self.PROJECT)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_read_missing_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEM0_HANDOFF_DIR", str(tmp_path))
+        assert hooks._read_previous_handoff(self.CWD, self.PROJECT) == ""
+
+    def test_read_strips_header_and_git_appendix(self, tmp_path, monkeypatch):
+        """Only the **Goal**-onward recap survives — header + git block stripped."""
+        prior = (
+            "<!-- mem0-brady handoff (auto-written) -->\n"
+            "# Handoff — myproject\n\n"
+            "- generated: 2026-06-26T00:00:00Z (source: session-stop-hook)\n"
+            "- cwd: `/home/user/myproject`\n\n"
+            "**Goal** — ship the parser.\n"
+            "**Next** — wire up the CLI.\n\n"
+            "---\n### git status\n```\n## main\n M parser.py\n```\n"
+        )
+        self._write_prior(tmp_path, monkeypatch, prior)
+
+        out = hooks._read_previous_handoff(self.CWD, self.PROJECT)
+        assert out.startswith("**Goal** — ship the parser.")
+        assert "wire up the CLI" in out
+        assert "git status" not in out
+        assert "generated:" not in out
+        assert "<!--" not in out
+
+    def test_read_truncates_to_max(self, tmp_path, monkeypatch):
+        body = "**Goal** — " + "x" * (hooks._HANDOFF_PREV_MAX + 500)
+        self._write_prior(tmp_path, monkeypatch, body)
+        out = hooks._read_previous_handoff(self.CWD, self.PROJECT)
+        assert len(out) == hooks._HANDOFF_PREV_MAX
+
+    def test_synthesis_folds_in_previous_handoff(self, tmp_path, monkeypatch):
+        """The prior recap is included in the LLM synthesis prompt."""
+        self._write_prior(
+            tmp_path, monkeypatch,
+            "**Goal** — migrate the auth layer to JWT.\n**Next** — add refresh tokens.\n",
+        )
+        mock_mem = MagicMock()
+        mock_mem.search.return_value = []
+        mock_mem.llm.generate_response.return_value = "**Goal** — updated recap."
+
+        out = hooks._synthesize_handoff(
+            mock_mem, [("user", "let's continue")], self.PROJECT, self.CWD
+        )
+
+        assert out == "**Goal** — updated recap."
+        prompt = mock_mem.llm.generate_response.call_args.kwargs["messages"][0]["content"]
+        assert "## Previous handoff" in prompt
+        assert "migrate the auth layer to JWT" in prompt
+        assert "Do not copy it verbatim" in prompt
+
+    def test_synthesis_placeholder_when_no_previous(self, tmp_path, monkeypatch):
+        """First handoff for a project gets a clear placeholder, not a crash."""
+        monkeypatch.setenv("MEM0_HANDOFF_DIR", str(tmp_path))
+        mock_mem = MagicMock()
+        mock_mem.search.return_value = []
+        mock_mem.llm.generate_response.return_value = "**Goal** — first recap."
+
+        hooks._synthesize_handoff(
+            mock_mem, [("user", "kick things off")], self.PROJECT, self.CWD
+        )
+
+        prompt = mock_mem.llm.generate_response.call_args.kwargs["messages"][0]["content"]
+        assert "first handoff for this project" in prompt
+
+
+# ---------------------------------------------------------------------------
 # 6.5  install_main
 # ---------------------------------------------------------------------------
 
