@@ -398,8 +398,86 @@ def _read_previous_handoff(cwd: str, project_name: str) -> str:
     return text.strip()[:_HANDOFF_PREV_MAX]
 
 
+# ---------------------------------------------------------------------------
+# Workstreams  (multi-session work spanning worktrees; see the plugin skill
+# /mem0-brady:workstream). A session is tagged with a workstream by an active
+# pointer keyed on session_id; when present, the Stop / PreCompact hooks fold
+# the workstream's overview into the handoff recap and bake a re-activation
+# call into the file so the workstream rides the handoff chain forward. Every
+# helper fails open — an untagged session (no pointer) behaves exactly as before.
+# ---------------------------------------------------------------------------
+
+_WORKSTREAM_DIR_ENV = "MEM0_WORKSTREAM_DIR"
+_WORKSTREAM_OVERVIEW_MAX = 1500  # chars of the workstream doc folded into synthesis
+
+
+def _workstream_dir() -> Path:
+    """Resolve the directory workstream docs + active pointers live under.
+
+    Override with ``MEM0_WORKSTREAM_DIR``; otherwise XDG data home (defaulting
+    to ``~/.local/share``) under ``mem0-brady/workstreams`` — alongside the
+    handoffs the workstream's pieces reference.
+    """
+    override = os.environ.get(_WORKSTREAM_DIR_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    xdg = os.environ.get("XDG_DATA_HOME", "").strip()
+    root = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "share"
+    return root / "mem0-brady" / "workstreams"
+
+
+def _active_workstream(session_id: str) -> dict | None:
+    """Return the active-workstream pointer for *session_id*, or None.
+
+    The pointer (``<workstream_dir>/active/<session_id>.json``) is written by
+    the /mem0-brady:workstream skill when a session is activated. A session
+    with no pointer is untagged. Fail-open: any error returns None.
+    """
+    if not session_id:
+        return None
+    try:
+        path = _workstream_dir() / "active" / f"{session_id}.json"
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.debug("reading active workstream failed", exc_info=True)
+        return None
+    return data if isinstance(data, dict) and data.get("slug") else None
+
+
+def _workstream_overview(slug: str) -> str:
+    """Return the workstream doc's Goal + Pieces prose for synthesis context.
+
+    Reads ``<workstream_dir>/<slug>.md`` from the ``## Goal`` heading onward
+    (skipping the HTML comment + metadata header), truncated to
+    ``_WORKSTREAM_OVERVIEW_MAX`` chars. The Pieces list is references only —
+    each piece's current state lives in its own handoff — so this stays a
+    compact overview. "" on any failure.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", slug or "").strip("-")
+    if not safe:
+        return ""
+    try:
+        path = _workstream_dir() / f"{safe}.md"
+        if not path.is_file():
+            return ""
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        logger.debug("reading workstream overview failed", exc_info=True)
+        return ""
+    goal = text.find("## Goal")
+    if goal != -1:
+        text = text[goal:]
+    return text.strip()[:_WORKSTREAM_OVERVIEW_MAX]
+
+
 def _synthesize_handoff(
-    mem, recent: list[tuple[str, str]], project_name: str, cwd: str = ""
+    mem,
+    recent: list[tuple[str, str]],
+    project_name: str,
+    cwd: str = "",
+    workstream: dict | None = None,
 ) -> str:
     """One LLM call turning the recent transcript + mem0 recall into a recap.
 
@@ -440,17 +518,38 @@ def _synthesize_handoff(
     except Exception:
         logger.debug("handoff recall failed", exc_info=True)
 
+    # When the session is tagged with a workstream, fold its overview (goal +
+    # the index of sibling pieces) into the synthesis so this per-cwd recap is
+    # situated within the larger, multi-session objective. Per-piece current
+    # state stays in each piece's own handoff — referenced, never inlined here.
+    workstream_block = ""
+    workstream_hint = ""
+    if workstream and workstream.get("slug"):
+        overview = _workstream_overview(workstream["slug"])
+        if overview:
+            workstream_block = (
+                f"## Active workstream '{workstream['slug']}' "
+                f"(overarching, multi-session context):\n{overview}\n\n"
+            )
+            workstream_hint = (
+                " This session is part of the workstream above — keep the Goal "
+                "consistent with its overarching objective, and do not restate "
+                "sibling pieces' state (that lives in their own handoffs)."
+            )
+
     prompt = (
         "You are writing a terse resume handoff so a future agent (or the same "
         "user returning to a cold context) can pick up a coding session "
         "immediately. Be concrete: name files, PR numbers, identifiers.\n\n"
+        f"{workstream_block}"
         f"## Previous handoff (the recap you are updating):\n{previous_block}\n\n"
         f"## Recent conversation (oldest first), project '{project_name}':\n"
         f"{convo}\n\n"
         f"## Relevant long-term memory:\n{recalled_block}\n\n"
         "Treat the previous handoff as prior state: carry forward goals and "
         "watch-outs that still hold, update State/Next from the recent "
-        "conversation, and drop anything now done. Do not copy it verbatim.\n\n"
+        "conversation, and drop anything now done. Do not copy it verbatim."
+        f"{workstream_hint}\n\n"
         "Write markdown under ~180 words, omitting any section that does not "
         "apply, with these headers:\n"
         "- **Goal** — the overarching objective in one sentence.\n"
@@ -482,14 +581,17 @@ def _write_handoff(
     project_name: str,
     cwd: str,
     source: str,
+    workstream: dict | None = None,
 ) -> Path | None:
     """Synthesize and write the handoff markdown. Returns its path or None.
 
     Fail-open: any error is swallowed (logged) and returns None so the Stop /
-    PreCompact response is never broken.
+    PreCompact response is never broken. When *workstream* is set, the recap is
+    synthesized with the workstream overview and a deterministic re-activation
+    call is baked into the file so a resuming session re-tags itself.
     """
     try:
-        body = _synthesize_handoff(mem, recent, project_name, cwd)
+        body = _synthesize_handoff(mem, recent, project_name, cwd, workstream)
         if not body:
             return None
 
@@ -497,15 +599,30 @@ def _write_handoff(
         path.parent.mkdir(parents=True, exist_ok=True)
 
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        slug = workstream.get("slug") if workstream else None
         parts = [
             "<!-- mem0-brady handoff (auto-written; overwritten each meaningful turn) -->",
             f"# Handoff — {project_name}",
             "",
             f"- generated: {ts} (source: {source})",
             f"- cwd: `{cwd}`",
-            "",
-            body,
         ]
+        if slug:
+            # Point the metadata at the workstream doc itself (referenceable),
+            # falling back to the conventional path if the pointer omitted it.
+            doc_path = workstream.get("doc_path") or str(_workstream_dir() / f"{slug}.md")
+            parts.append(f"- workstream: `{slug}` → `{doc_path}`")
+        parts += ["", body]
+        # Bake the re-activation call in deterministically (not via the LLM, so
+        # it is never dropped): a session resuming from this handoff runs the
+        # skill, re-tags itself, and pulls the workstream overview + sibling work.
+        if slug:
+            parts += [
+                "",
+                f"**Workstream** — part of `{slug}`. To resume with the full "
+                f"overarching context (goal + sibling work), run "
+                f"`/mem0-brady:workstream {slug}` at the start of the session.",
+            ]
         git_block = _git_status_block(cwd)
         if git_block:
             parts += ["", "---", "### git status", "```", git_block, "```"]
@@ -563,6 +680,14 @@ def _capture_summary(
     if app_id:
         metadata["app_id"] = app_id
 
+    # When the session is tagged with a workstream (active pointer keyed on
+    # session_id), tag the captured memory with workstream_id so passive recall
+    # and /digest can filter by workstream, and pass it into the handoff so the
+    # recap is workstream-aware and carries the re-activation call.
+    workstream = _active_workstream(session_id)
+    if workstream:
+        metadata["workstream_id"] = workstream["slug"]
+
     mem = _get_memory()
     mem.add(
         messages=[{"role": "user", "content": summary}],
@@ -573,7 +698,7 @@ def _capture_summary(
 
     # Resume-recap handoff (reuses the messages already read + the same mem
     # instance). Fail-open inside _write_handoff.
-    return _write_handoff(mem, recent, project_name, cwd, source)
+    return _write_handoff(mem, recent, project_name, cwd, source, workstream)
 
 
 def stop_main() -> None:
