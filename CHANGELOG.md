@@ -1,6 +1,20 @@
 # CHANGELOG
 
 
+## v0.11.0 (2026-07-01)
+
+### Features
+
+- **hooks**: Workstream-aware handoffs
+  ([`7576bef`](https://github.com/brady-zip/mem0-mcp-selfhosted/commit/7576bef12df900402d1d4ae2846ae67c7136cf20))
+
+When a session is tagged with a workstream (active pointer keyed on session_id, written by the
+  mem0-brady workstream skill), fold the workstream's overview into the Stop/PreCompact handoff
+  synthesis, bake a /mem0-brady:workstream <slug> re-activation call into the handoff, and tag the
+  captured session summary with workstream_id. Untagged sessions are unchanged — all additions are
+  gated on the active pointer.
+
+
 ## v0.10.0 (2026-06-26)
 
 ### Features
